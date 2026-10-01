@@ -1,0 +1,18 @@
+{
+  "name": "pi-herdr-swarm",
+  "version": "0.1.0",
+  "description": "Named peer agents and an expiring shared board for pi and herdr",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "repository": { "type": "git", "url": "https://github.com/fyang93/pi-herdr-swarm" },
+  "engines": { "node": ">=22.19.0" },
+  "pi": { "extensions": ["./pi-extension/index.ts"] },
+  "scripts": { "test": "node --test test/*.test.ts", "check": "tsc --noEmit" },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.9.3" }
+}
