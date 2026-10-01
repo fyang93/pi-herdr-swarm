@@ -10,7 +10,10 @@ import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, boardResult, noticeView, resultMessageView } from "./ui.ts";
 
 export { PENDING_COUNT_KEY } from "./run.ts";
-const textResult = (text: string, details: unknown = undefined, isError = false) => ({ content: [{ type: "text" as const, text: text.length > 30_000 ? `${text.slice(0, 29_900)}\n… truncated; narrow the board filters or limit.` : text }], details, isError });
+function textResult(text: string, details: unknown = undefined, isError = false) {
+  if (text.length > 30_000) text = `${text.slice(0, 29_900)}\n… truncated; narrow the board filters or limit.`;
+  return { content: [{ type: "text" as const, text }], details, isError };
+}
 const messageLimit = { minLength: 1, maxLength: MESSAGE_LIMIT, description: "Up to 4000 characters. Longer bodies go in a file; send a summary and file path." };
 
 export default function swarm(pi: ExtensionAPI) {
@@ -31,6 +34,41 @@ export default function swarm(pi: ExtensionAPI) {
   });
   const runState = lifecycle(pi, path);
 
+  type History = ReturnType<typeof runState.history>;
+  /** Restore an ended run of ours: same session and saved configuration; the next reply follows `boundary`. */
+  async function prepareResume(params: { resume?: string; agent?: string; model?: string; cwd?: string; name?: string }, history: History, known: string) {
+    if ([params.agent, params.model, params.cwd, params.name].some(v => v !== undefined)) throw new Error("resume accepts only task and optional detach.");
+    const previous = history.get(params.resume!);
+    const saved = previous?.snapshot;
+    if (!previous?.session || !saved?.model || !saved.thinking || !saved.cwd || !Array.isArray(saved.skills)) {
+      throw new Error(`Cannot resume ${params.resume}: snapshot/session/cwd missing. ${known}`);
+    }
+    const peer = validateName(params.resume!);
+    try {
+      const agents = await list();
+      if (runState.pending(previous.session) || agents.some(a => a.name === peer) || sessionBinding(agents, previous.session)) {
+        throw new Error("run is live, pending or its online state is unknown");
+      }
+      if (!previous.detach && !runState.archived(previous.entryId)) throw new Error("previous result is not archived");
+      const session = await realpath(previous.session);
+      return { peer, config: { ...saved, cwd: await realpath(saved.cwd) }, session, boundary: readSession(session).getLeafId() };
+    } catch (error) {
+      throw new Error(`Cannot resume ${peer}: ${String(error)}; session: ${previous.session}; cwd: ${saved.cwd}. ${known}`);
+    }
+  }
+  /** A fresh peer with its own session file under this session's directory. */
+  async function prepareSpawn(params: { agent?: string; name?: string; model?: string; cwd?: string }, history: History, known: string, context: ExtensionContext) {
+    const preset = params.agent === undefined ? undefined : presets(context.cwd, context.isProjectTrusted()).find(p => p.name === params.agent);
+    if (params.agent !== undefined && !preset) throw new Error(`Unknown preset ${params.agent}. Use swarm_list.`);
+    const peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), history.keys()));
+    if (history.has(peer)) throw new Error(`${peer} was already spawned; use resume explicitly. ${known}`);
+    const config = await snapshot(preset, context, pi.getThinkingLevel(), params);
+    const runsDir = join(context.sessionManager.getSessionDir(), "swarm-runs");
+    mkdirSync(runsDir, { recursive: true });
+    const session = join(await realpath(mkdtempSync(join(runsDir, `${peer}-`))), "session.jsonl");
+    return { peer, config, session, boundary: null as string | null };
+  }
+
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
     description: "Start a fresh pi peer with optional configuration preset; role belongs in task. Inherit model/thinking, not history or tool restrictions. Auto names avoid online and historical names. resume restores your ended peer's session and saved configuration; only task/detach may accompany resume. All spawned peers auto-exit unless interrupted; default waits and reads the final reply from their session. detach skips waiting and leaves only a board result. Send never resumes peers.",
@@ -42,40 +80,24 @@ export default function swarm(pi: ExtensionAPI) {
       const spawner = await name(context);
       const history = runState.history();
       const known = `Known names: ${[...history.keys()].join(", ") || "(none)"}`;
-      let peer: string, config, session: string, boundary: string | null = null;
-      if (params.resume !== undefined) {
-        if ([params.agent, params.model, params.cwd, params.name].some(v => v !== undefined)) throw new Error("resume accepts only task and optional detach.");
-        const previous = history.get(params.resume);
-        if (!previous?.snapshot?.model || !previous.snapshot.thinking || !Array.isArray(previous.snapshot.skills) || !previous.session || !previous.snapshot.cwd) throw new Error(`Cannot resume ${params.resume}: snapshot/session/cwd missing. ${known}`);
-        peer = validateName(params.resume);
-        try {
-          const agents = await list();
-          if (runState.pending(previous.session) || agents.some(a => a.name === peer) || sessionBinding(agents, previous.session)) throw new Error("run is live, pending or its online state is unknown");
-          if (!previous.detach && !runState.archived(previous.entryId)) throw new Error("previous result is not archived");
-          config = { ...previous.snapshot, cwd: await realpath(previous.snapshot.cwd) };
-          session = await realpath(previous.session);
-          boundary = readSession(session).getLeafId();
-        } catch (error) { throw new Error(`Cannot resume ${peer}: ${String(error)}; session: ${previous.session}; cwd: ${previous.snapshot.cwd}. ${known}`); }
-      } else {
-        const preset = params.agent === undefined ? undefined : presets(context.cwd, context.isProjectTrusted()).find(p => p.name === params.agent);
-        if (params.agent !== undefined && !preset) throw new Error(`Unknown preset ${params.agent}. Use swarm_list.`);
-        peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), history.keys()));
-        if (history.has(peer)) throw new Error(`${peer} was already spawned; use resume explicitly. ${known}`);
-        config = await snapshot(preset, context, pi.getThinkingLevel(), params);
-        const runsDir = join(context.sessionManager.getSessionDir(), "swarm-runs");
-        mkdirSync(runsDir, { recursive: true });
-        session = join(await realpath(mkdtempSync(join(runsDir, `${peer}-`))), "session.jsonl");
-      }
+      const { peer, config, session, boundary } = params.resume !== undefined
+        ? await prepareResume(params, history, known)
+        : await prepareSpawn(params, history, known, context);
       const settings = loadout(config, session, params.task);
-      if (params.resume === undefined) settings.task = `你是 ${peer}，由 ${spawner} 派出。你的最后一条回复${params.detach ? "会写进留言板" : `会作为结果交给 ${spawner}`}，之后你会自动退出。\n\n${settings.task}`;
+      if (params.resume === undefined) {
+        const delivery = params.detach ? "会写进留言板" : `会作为结果交给 ${spawner}`;
+        settings.task = `你是 ${peer}，由 ${spawner} 派出。你的最后一条回复${delivery}，之后你会自动退出。\n\n${settings.task}`;
+      }
       settings.args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
       if (boundary) settings.args.push("--swarm-boundary", boundary);
       if (params.detach) settings.args.push("--swarm-detach");
       let entry: string | undefined;
       let launched;
       try {
-        launched = await start({ name: peer, cwd: config.cwd, args: settings.args, task: settings.task, session, resume: params.resume !== undefined, maxAgents, env: {},
-          beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); } });
+        launched = await start({
+          name: peer, cwd: config.cwd, args: settings.args, task: settings.task, session, resume: params.resume !== undefined, maxAgents, env: {},
+          beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
+        });
       } finally { if (entry) runState.launched(entry); }
       return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached; board only." : "Waiting for this session binding to end."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
     },

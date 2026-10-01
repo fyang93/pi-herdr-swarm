@@ -8,8 +8,12 @@ type Input = Pick<Note, "from" | "to" | "message"> & Partial<Pick<Note, "kind">>
 export const DAY = 86_400;
 export const MESSAGE_LIMIT = 4000;
 export const boardPath = (root: string) => join(root, ".pi/swarm/board");
+const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+const PATTERN = /^[a-z0-9_*-]{1,128}$/;
+/** Envelope fields are rendered into message headers, so they must be plain names or '*' patterns. */
 function validate(input: Input): void {
-  if (typeof input.from !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(input.from) || typeof input.to !== "string" || !( /^[a-z][a-z0-9_-]{0,31}$/.test(input.to) || (input.to.includes("*") && /^[a-z0-9_*-]{1,128}$/.test(input.to)))) throw new Error("Invalid envelope sender or target.");
+  const target = typeof input.to === "string" && (NAME.test(input.to) || (input.to.includes("*") && PATTERN.test(input.to)));
+  if (typeof input.from !== "string" || !NAME.test(input.from) || !target) throw new Error("Invalid envelope sender or target.");
   if (input.kind !== undefined && !["message", "result"].includes(input.kind)) throw new Error("Invalid envelope kind.");
   if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Message must be nonempty.");
   if (input.message.length > MESSAGE_LIMIT) throw new Error(`Message exceeds ${MESSAGE_LIMIT} characters; write the body to a file, then send a summary and file path.`);
@@ -25,7 +29,8 @@ function publish(path: string, note: Note): Note {
   const markdown = `---\n${Object.entries(fields).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join("\n")}\n---\n${note.message}`;
   for (let n = 1; ; n++) {
     const name = `${note.created}-${note.from}${n === 1 ? "" : `-${n}`}.md`;
-    const file = join(path, name); const temp = join(path, `.${name}.${process.pid}.tmp`);
+    const file = join(path, name);
+    const temp = join(path, `.${name}.${process.pid}.tmp`);
     let fd: number;
     try { fd = openSync(temp, "wx"); } catch (error: any) { if (error.code === "EEXIST") continue; throw error; }
     try {
@@ -45,8 +50,35 @@ export async function post(path: string, input: Input, report?: (warning: string
   return publish(path, note);
 }
 function timestamp(value: unknown): number {
-  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) || new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) throw new Error("Invalid timestamp.");
-  return Date.parse(value);
+  const time = typeof value === "string" ? Date.parse(value) : NaN;
+  if (!Number.isFinite(time)) throw new Error("Invalid timestamp.");
+  return time;
+}
+const CAP = 64 * 1024;
+/** Read at most CAP bytes from an opened regular file; undefined when it is larger or not a regular file. */
+async function readCapped(file: string, report: (warning: string) => void): Promise<string | undefined> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!(await handle.stat()).isFile()) { report(`Skipped non-regular board file: ${file}`); return undefined; }
+    const buffer = Buffer.alloc(CAP + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, bytes, buffer.length - bytes, null);
+      if (!bytesRead) break;
+      bytes += bytesRead;
+    }
+    if (bytes > CAP) { report(`Skipped board file over 64 KiB: ${file}`); return undefined; }
+    return buffer.subarray(0, bytes).toString("utf8");
+  } finally { await handle.close(); }
+}
+function parseNote(text: string): Note | undefined {
+  try {
+    const { frontmatter: f, body } = parseFrontmatter(text);
+    if (typeof f.from !== "string" || typeof f.to !== "string" || (f.kind !== "message" && f.kind !== "result")) return undefined;
+    const note: Note = { from: f.from, to: f.to, kind: f.kind, message: body, created: timestamp(f.created), expires: timestamp(f.expires) };
+    validate(note);
+    return note.expires > note.created ? note : undefined;
+  } catch { return undefined; }
 }
 export async function readBoard(path: string, filter: { from?: string; to?: string; limit?: number } = {}, report: (warning: string) => void = console.warn): Promise<Note[]> {
   const limit = filter.limit ?? 20;
@@ -55,30 +87,20 @@ export async function readBoard(path: string, filter: { from?: string; to?: stri
   try { files = (await readdir(path)).filter(f => f.endsWith(".md")).sort().reverse(); }
   catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
   // ponytail: scan retained files on access; add an index only if directory size makes this slow.
-  const notes: Note[] = []; const buffer = Buffer.alloc(64 * 1024 + 1);
+  const notes: Note[] = [];
   for (const name of files) {
     const file = join(path, name);
-    let text: string;
-    try {
-      const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
-      try {
-        if (!(await handle.stat()).isFile()) { report(`Skipped non-regular board file: ${file}`); continue; }
-        let bytes = 0;
-        while (bytes < buffer.length) { const r = await handle.read(buffer, bytes, buffer.length - bytes, null); if (!r.bytesRead) break; bytes += r.bytesRead; }
-        if (bytes === buffer.length) { report(`Skipped board file over 64 KiB: ${file}`); continue; }
-        text = buffer.subarray(0, bytes).toString("utf8");
-      } finally { await handle.close(); }
-    } catch (error: any) { if (error.code === "ENOENT") continue; throw error; }
-    let note: Note;
-    try {
-      const { frontmatter: f, body } = parseFrontmatter(text);
-      if (typeof f.from !== "string" || typeof f.to !== "string" || !["message", "result"].includes(f.kind as string)) continue;
-      note = { from: f.from, to: f.to, kind: f.kind as Note["kind"], message: body, created: timestamp(f.created), expires: timestamp(f.expires) };
-      validate(note);
-      if (!Number.isSafeInteger(note.created) || !Number.isSafeInteger(note.expires) || note.expires <= note.created) continue;
-    } catch { continue; }
-    if (note.expires <= Date.now()) { try { await unlink(file); } catch (error: any) { if (error.code !== "ENOENT") throw error; } }
-    else if (notes.length < limit && (filter.from === undefined || note.from === filter.from) && (filter.to === undefined || note.to === filter.to)) notes.push(note);
+    let text: string | undefined;
+    try { text = await readCapped(file, report); }
+    catch (error: any) { if (error.code === "ENOENT") continue; throw error; }
+    const note = text === undefined ? undefined : parseNote(text);
+    if (!note) continue;
+    if (note.expires <= Date.now()) {
+      try { await unlink(file); } catch (error: any) { if (error.code !== "ENOENT") throw error; }
+      continue;
+    }
+    const matches = (filter.from === undefined || note.from === filter.from) && (filter.to === undefined || note.to === filter.to);
+    if (matches && notes.length < limit) notes.push(note);
   }
   return notes;
 }

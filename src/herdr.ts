@@ -56,9 +56,15 @@ export async function list(): Promise<LiveAgent[]> {
 export function sessionPath(path: string): string {
   try { return realpathSync(path); } catch (error: any) { if (error.code === "ENOENT") return resolve(path); throw error; }
 }
+const hasSessionPath = (a: LiveAgent) => a.agent_session?.kind === "path" && typeof a.agent_session.value === "string" && !!a.agent_session.value;
+/**
+ * The live agent bound to `session`, by session path rather than name (running agents can lose names).
+ * Throws while any pi is starting or reports no session: the binding cannot be ruled out yet.
+ */
 export function sessionBinding(agents: LiveAgent[], session: string): LiveAgent | undefined {
-  if (agents.some(a => a.agent_status === "starting" || ((a.agent === "pi" || a.agent === "starting") && (a.agent_session?.kind !== "path" || typeof a.agent_session.value !== "string" || !a.agent_session.value)))) throw new Error("herdr session bindings unknown; still waiting.");
-  return agents.find(a => a.agent_session?.kind === "path" && sessionPath(a.agent_session.value) === sessionPath(session));
+  const uncertain = agents.some(a => a.agent_status === "starting" || ((a.agent === "pi" || a.agent === "starting") && !hasSessionPath(a)));
+  if (uncertain) throw new Error("herdr session bindings unknown; still waiting.");
+  return agents.find(a => hasSessionPath(a) && sessionPath(a.agent_session!.value) === sessionPath(session));
 }
 export async function get(name: string): Promise<LiveAgent | undefined> {
   try {
@@ -87,18 +93,18 @@ export function availableName(base: string, agents: LiveAgent[], history: Iterab
   const used = new Set([...agents.map(a => a.name), ...history]);
   for (let n = 1; ; n++) { const name = `${base}-${n}`; if (!used.has(name)) return name; }
 }
+/** This session's herdr name; an unnamed caller is named after its pane (unique while online), never renamed. */
 export async function identity(named?: (name: string) => void): Promise<string> {
-    requireHerdr();
-    const pane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
-    const own = await get(pane);
-    if (!own) throw new Error("herdr does not recognize pi in the caller's pane.");
-    if (own.name) return validateName(own.name);
-    const name = validateName(`swarm-${pane.replace(":", "-").toLowerCase()}`);
-    const confirmed = (await herdr(["agent", "rename", pane, name])).agent;
-    if (confirmed?.pane_id !== pane || !confirmed.name) throw new Error("herdr did not confirm the agent name; inspect the caller pane.");
-    const actual = validateName(confirmed.name);
-    named?.(actual);
-    return actual;
+  requireHerdr();
+  const pane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
+  const own = await get(pane);
+  if (!own) throw new Error("herdr does not recognize pi in the caller's pane.");
+  if (own.name) return validateName(own.name);
+  const name = validateName(`swarm-${pane.replace(":", "-").toLowerCase()}`);
+  const confirmed = (await herdr(["agent", "rename", pane, name])).agent;
+  if (confirmed?.pane_id !== pane || !confirmed.name) throw new Error("herdr did not confirm the agent name; inspect the caller pane.");
+  named?.(validateName(confirmed.name));
+  return confirmed.name;
 }
 
 export function addressPattern(address: string): RegExp | undefined {
@@ -147,7 +153,19 @@ export function splitDirection(width: number, height: number): "right" | "down" 
   return (height * 2 > width ? ["down", "right"] as const : ["right", "down"] as const).find(d => fits[d]);
 }
 let creationQueue: Promise<unknown> = Promise.resolve();
-export function start(launch: { name: string; cwd: string; args: string[]; env: Record<string, string>; task: string; session?: string; resume?: boolean; maxAgents?: number; beforeStart?: (pane: string) => void }): Promise<{ name: string; pane: string }> {
+export interface Launch {
+  name: string;
+  cwd: string;
+  args: string[];
+  env: Record<string, string>;
+  task: string;
+  session?: string;
+  resume?: boolean;
+  maxAgents?: number;
+  /** Called with the new pane before the agent starts, so the spawn record exists even if start blocks. */
+  beforeStart?: (pane: string) => void;
+}
+export function start(launch: Launch): Promise<{ name: string; pane: string }> {
   // Local layout serialization, not a distributed name claim. herdr enforces uniqueness.
   const next = creationQueue.then(async () => {
     requireHerdr();
