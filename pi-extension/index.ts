@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
-import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -8,36 +7,13 @@ import { boardPath, DAY, MESSAGE_LIMIT, formatNote, post, readBoard } from "./bo
 import { availableName, herdr, identity, list, requireHerdr, send, start, validateName, type LiveAgent } from "./herdr.ts";
 import { loadout, profiles, profileCwd } from "./profiles.ts";
 import { alive, canExit, finalSummary, readJSON, writeJSON, resultStamp, type Exit, type Run } from "./lifecycle.ts";
+import { frame, agentRow, callView, renderToolResult, noticeView } from "./ui.ts";
 
 const textResult = (text: string, details: unknown = undefined, isError = false) => ({ content: [{ type: "text" as const, text: text.length > 30_000 ? `${text.slice(0, 29_900)}\n… truncated; narrow the board filters or limit.` : text }], details, isError });
 export const PENDING_COUNT_KEY = Symbol.for("pi-herdr-swarm/pending-count");
 const messageLimit = { minLength: 1, maxLength: MESSAGE_LIMIT, description: "Up to 4000 characters. Longer bodies go in a file; send a summary and file path." };
 const ttlSchema = Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 365 * DAY, description: "Lifetime in seconds; default 24 hours." }));
 const tagsSchema = Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { maxItems: 20 }));
-
-/** Width-safe, themed live widget. */
-export function frame(title: string, rows: string[], theme: any) {
-  return {
-    invalidate() {},
-    render(width: number): string[] {
-      if (width < 4) return [];
-      const inner = width - 2;
-      const edge = (s: string) => theme.fg("accent", s);
-      const header = truncateToWidth(`─ ${title} `, inner);
-      return [edge(`╭${header}${"─".repeat(Math.max(0, inner - visibleWidth(header)))}╮`),
-        ...rows.map(row => {
-          const line = truncateToWidth(` ${row}`, inner);
-          return edge("│") + line + " ".repeat(Math.max(0, inner - visibleWidth(line))) + edge("│");
-        }), edge(`╰${"─".repeat(inner)}╯`)];
-    },
-  };
-}
-function resultBox(text: string, expanded: boolean, theme: any, failed = false) {
-  const lines = text.split("\n");
-  const box = new Box(1, 1, (s: string) => theme.bg(failed ? "toolErrorBg" : "toolSuccessBg", s));
-  box.addChild(new Text((expanded ? lines : lines.slice(0, 8)).join("\n") + (!expanded && lines.length > 8 ? `\n… ${lines.length - 8} more lines · Ctrl+O` : ""), 0, 0));
-  return box;
-}
 
 export default function swarm(pi: ExtensionAPI) {
   let ctx: ExtensionContext | undefined;
@@ -62,7 +38,7 @@ export default function swarm(pi: ExtensionAPI) {
     if (ctx?.mode !== "tui") return;
     ctx.ui.setWidget("swarm", runs.size ? (_tui, theme) => frame(`Swarm · ${runs.size} pending`, [...runs.values()].map(run => {
       const agent = statuses.find(a => a.name === run.name);
-      return `${run.name}  ${agent?.agent_status || "unlisted · outcome unknown"}  ${agent?.pane_id || run.pane}`;
+      return agentRow({ name: run.name, agent_status: agent?.agent_status || "unlisted", pane_id: agent?.pane_id || run.pane }, theme);
     }), theme) : undefined);
   }
   async function notice(text: string) {
@@ -209,8 +185,10 @@ export default function swarm(pi: ExtensionAPI) {
       widget();
       return textResult(`${name} started in ${run.pane}. Spawner: ${spawnerName}. Results also remain readable on the board until expiry.`, { name, pane: run.pane });
     },
-    renderCall(args, theme) { return new Text(theme.fg("accent", "○ ") + theme.bold(String(args.name || args.agent || "peer")) + `\n${String(args.task || "").split("\n")[0]}`, 0, 0); },
-    renderResult(result, options, theme) { return resultBox(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme, !!result.isError); },
+    renderCall(args, theme, context) {
+      return callView(theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "…") + theme.fg("dim", " → ") + theme.fg("accent", args.name || args.agent || "…"), args.task || "", context.expanded, theme);
+    },
+    renderResult: renderToolResult,
   });
   pi.registerTool({
     name: "swarm_send", label: "Swarm send",
@@ -224,8 +202,10 @@ export default function swarm(pi: ExtensionAPI) {
         (result.deliveries.map(d => `${d.submitted ? "✓ submitted" : "✗ not confirmed"} → ${d.to}${d.error ? `: ${d.error}` : ""}`).join("\n") || "No matching named agents to notify.");
       return textResult(text, result, failures.length > 0);
     },
-    renderCall(args, theme) { return new Text(theme.fg("accent", "↗ ") + theme.bold(String(args.to || "peer")) + `\n${String(args.message || "").split("\n")[0]}`, 0, 0); },
-    renderResult(result, options, theme) { return resultBox(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme, !!result.isError); },
+    renderCall(args, theme, context) {
+      return callView(theme.fg("toolTitle", theme.bold("send")) + theme.fg("dim", " → ") + theme.fg("accent", args.to || "…"), args.message || "", context.expanded, theme);
+    },
+    renderResult: renderToolResult,
   });
   pi.registerTool({
     name: "swarm_list", label: "Swarm list",
@@ -236,9 +216,12 @@ export default function swarm(pi: ExtensionAPI) {
       const agents = await list();
       const definitions = profiles(context.cwd, context.isProjectTrusted()).filter(p => !p.fields["disable-model-invocation"]);
       return textResult(agents.map(a => `${a.name || "(unnamed)"} · ${a.agent_status || "unknown"} · ${a.pane_id}`).join("\n") +
-        `\n\nDefinitions:\n${definitions.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`).join("\n")}\nUnlisted does not prove completion or a crash.`, { agents });
+        `\n\nDefinitions:\n${definitions.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`).join("\n")}\nUnlisted does not prove completion or a crash.`, { agents, definitions: definitions.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })) });
     },
-    renderResult(result, options, theme) { return resultBox(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme); },
+    renderCall(_args, theme, context) {
+      return callView(theme.fg("toolTitle", theme.bold("list")) + theme.fg("dim", " · agents + definitions"), "", context.expanded, theme);
+    },
+    renderResult: renderToolResult,
   });
   pi.registerTool({
     name: "swarm_board", label: "Swarm board",
@@ -253,7 +236,13 @@ export default function swarm(pi: ExtensionAPI) {
       const notes = readBoard(path, params);
       return textResult(notes.map(formatNote).join("\n\n") || "No unexpired messages.", { notes });
     },
-    renderResult(result, options, theme) { return resultBox(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme); },
+    renderCall(args, theme, context) {
+      const title = args.message !== undefined
+        ? theme.fg("toolTitle", theme.bold("board post")) + theme.fg("dim", " → ") + theme.fg("accent", args.to || "*") + theme.fg("dim", " · board only, no notification")
+        : theme.fg("toolTitle", theme.bold("board read")) + theme.fg("dim", ` · from=${args.from || "*"} · tag=${args.tag || "*"} · limit=${args.limit ?? 20}${args.to ? ` · to=${args.to}` : ""}`);
+      return callView(title, args.message || "", context.expanded, theme);
+    },
+    renderResult: renderToolResult,
   });
-  pi.registerMessageRenderer("swarm_notice", (message, options, theme) => resultBox(String(message.content), options.expanded, theme));
+  pi.registerMessageRenderer("swarm_notice", (message, options, theme) => noticeView(String(message.content), options.expanded, theme));
 }

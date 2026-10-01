@@ -11,7 +11,8 @@ import { DAY, post, readBoard } from "../pi-extension/board.ts";
 import { send, start, splitDirection, HerdrError, identity } from "../pi-extension/herdr.ts";
 import { profiles, loadout } from "../pi-extension/profiles.ts";
 import { canExit, finalText, wasAborted, writeJSON, alive } from "../pi-extension/lifecycle.ts";
-import swarm, { frame, PENDING_COUNT_KEY } from "../pi-extension/index.ts";
+import swarm, { PENDING_COUNT_KEY } from "../pi-extension/index.ts";
+import { frame } from "../pi-extension/ui.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-test-"));
@@ -295,7 +296,7 @@ test("tool primitives expose no UUID, unknown definitions fail, board-only posts
 test("frames handle Chinese, ANSI and narrow widths", () => {
   const theme = { fg: (_name: string, text: string) => `\x1b[36m${text}\x1b[0m` };
   for (const width of [1, 3, 4, 8, 30, 80]) {
-    const lines = frame("蜂群", ["研究员 · working · w1:p9", "\x1b[31merror\x1b[0m"], theme).render(width);
+    const lines = frame("蜂群", ["研究员 · working · w1:p9", "\x1b[31merror\x1b[0m"], theme as any).render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width));
   }
 });

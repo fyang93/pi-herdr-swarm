@@ -2,3 +2,5 @@ node_modules/
 .pi/swarm/
 .design-brief.md
 .design-addendum.md
+.design-review-fixes.md
+.design-final.md

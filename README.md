@@ -28,6 +28,8 @@ swarm_board({ from: "auth-review", tag: "result", limit: 10 });
 
 **Addressing:** an exact name may cross projects. A pattern containing `*` matches whole names in the current project subtree only (`news*`, `*news*`, `us-*-1`, `*`). Consecutive stars collapse; no `?`, brackets, or other glob syntax. Patterns exclude the sender and unnamed panes. Names do not imply roles or permissions; use message tags for topics. Group sends wake every recipient and consume their tokens.
 
+**TUI:** action-labelled calls show a short preview; tool results use pi's own shell and collapse to at most eight display rows. Expand with your configured pi tool-output key. Board headers show sender, recipient, type, tags and relative lifetime; agent badges preserve herdr's real state, with unlisted/unknown shown as warnings.
+
 **Submission is not acknowledgement.** Busy pi agents queue input; blocked dialogs or unavailable agents produce errors. A timeout may mean an uncertain delivery: inspect, don't blindly resend. A failed private message still remains on the board. The board is shared, **not confidential**.
 
 ## Board metabolism
