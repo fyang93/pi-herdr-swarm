@@ -1,89 +1,80 @@
 # pi-herdr-swarm
 
-Named pi peers inside [herdr](https://herdr.dev), an expiring Markdown board, and resumable sessions. Spawning creates an optional wait for one run—not management authority or a shared lifespan. Any agent can send or spawn.
+A swarm of [pi](https://github.com/badlogic/pi-mono) agents inside [herdr](https://herdr.dev). Four concepts: **names** (herdr's online addresses), **messages**, an expiring **board**, and **sessions** (where results live). Groups, delegation and pipelines are compositions of these; there is no hierarchy. Spawning only creates an optional wait for one run's result. Any agent can message or spawn any other.
 
 ## Install
 
-Requires Node **22.19+**, herdr **0.9+**, and pi with `agent_before_settle` / `agent_settled`. Install herdr's pi integration first, then run pi inside herdr:
+Requires Node 22.19+, herdr 0.9+ with its pi integration, and pi running inside herdr.
 
 ```sh
 herdr integration install pi
-herdr integration status
 pi install git:github.com/fyang93/pi-herdr-swarm
-# Or load this checkout:
-pi -e ./src/index.ts
 ```
 
-## Four tools
+## Tools
 
 ```typescript
 swarm_spawn({ name: "review-1", task: "Review this change and report findings." });
-swarm_send({ to: "review-1", message: "Also inspect input validation." });
+swarm_spawn({ task: "Watch the logs for errors.", detach: true });
+swarm_spawn({ resume: "review-1", task: "Now review the follow-up change." });
+
+swarm_send({ to: "review-1", message: "Also check input validation." });
+swarm_send({ to: "*review*", message: "The change is ready." });   // every matching agent in this project
+swarm_send({ message: "Notes are in reports/notes.md" });          // board only, wakes nobody
+
 swarm_list();
 swarm_board({ from: "review-1", limit: 10 });
-
-swarm_send({ message: "Notes are in reports/notes.md" }); // posted · board only
-swarm_send({ to: "*review*", message: "The change is ready for review." });
-swarm_spawn({ task: "Analyze the report.", detach: true });
-swarm_spawn({ resume: "review-1", task: "Review the follow-up change." });
 ```
 
-- **Spawn:** `{task, agent?, name?, model?, cwd?, detach?}`. Optional configuration preset; explicit values override presets, then current spawner model/thinking. Fresh tasks get a factual identity/spawner/completion preamble. Tools and extensions load normally; trust is entirely pi's responsibility. The extension never passes automatic approval.
-- **Resume:** `{resume, task, detach?}` only. Reuse your ended run's session and saved configuration in a new pane, without repeating the preamble. Occupied names, live/uncertain bindings, missing snapshot/session/cwd, or unarchived previous results refuse resume.
-- **Send:** `{message, to?}`. Persist first, then native `herdr agent prompt`; no recipient preflight, process startup, rerouting or retries. Omit to for board-only. Exact names can cross projects; `*` anywhere matches whole names only within the same project, excluding sender and unnamed agents. Consecutive stars merge; no other glob syntax. Results are submitted/rejected/unknown with error codes.
-- **List:** no arguments; online names, states, panes and presets, without naming the caller.
-- **Board:** `{from?, to?, limit?}`; original-field exact filters, not a personal inbox. Default 20, maximum 100, model-facing text capped at 30,000 characters. Reads reclaim expired files but do not publish, submit or name anyone.
+| Tool | Does |
+|---|---|
+| `swarm_spawn({task, agent?, name?, model?, cwd?, detach?})` | Starts a fresh pi in a new pane and returns immediately. The role goes in `task`. Its final reply comes back to you when it ends; with `detach` it goes to the board only and nobody waits. |
+| `swarm_spawn({resume, task, detach?})` | Continues one of your ended runs with its full context and saved configuration. |
+| `swarm_send({message, to?})` | Writes to the board, then delivers to `to`: an exact name (any project), or a pattern with `*` anywhere (same project only). Omit `to` to only post. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries. Never starts a process. |
+| `swarm_list()` | Online agents (name, state, pane) and available presets. |
+| `swarm_board({from?, to?, limit?})` | Recent unexpired messages, newest first. |
 
-Names match `[a-z][a-z0-9_-]{0,31}`. Automatic peer names are `<preset-or-peer>-N`, avoiding online and all historical spawn names. A fresh spawn cannot reuse your historical name: resume explicitly. Only send/spawn may name an unnamed caller from its pane ID, e.g. `swarm-w5-p1`, with a notification. Name collisions and uncertain renames are errors, not retried.
+## How a run works
 
-## Configuration and board
+1. **Spawn.** A new pane opens next to yours (or in a background tab) and pi starts there with the task. You keep working; a line shows `Waiting: review-1`.
+2. **Work.** The peer can message, broadcast or spawn helpers of its own.
+3. **End.** When it finishes, it posts its final reply to the board, exits and closes its pane. Escape or typing in its pane keeps it open.
+4. **Result.** You see that its session has ended, read the final reply from its session file, and get it as a `swarm_result` plus a short wake-up notice. Errors, interruptions and empty replies are reported as such.
 
-Optional presets: `~/.pi/agent/agents/*.md` (or `PI_CODING_AGENT_DIR/agents`) and trusted project `.pi/agents/*.md`; project values override global ones. Supported fields: model, thinking, cwd, system prompt append/replace, skills/skill. Prompt body and skill contents are saved in the resolved snapshot for resume; thinking is clamped to model capabilities.
-
-```markdown
----
-name: reviewer
-description: Review configuration
-thinking: low
-system-prompt: append
----
-Report actionable findings with file paths.
-```
-
-The board is fixed at `<canonical-project-root>/.pi/swarm/board/`. Each message is `<created-ms>-<from>.md`, with collision suffixes and quoted frontmatter: from/to strings, message/result kind, ISO created/expires. Exclusive temporary creation plus atomic hard-link publication never overwrites a message. Bodies are at most **4000 characters**; larger work belongs in a report file. Retention is fixed at **24 hours**; grep the directory for topics.
-
-Reads are asynchronous and bounded to 64 KiB+1 per file. Oversized/non-regular files are skipped with paths, invalid messages are skipped, and other filesystem errors are reported. Ordinary reads/writes reclaim expired files; synchronous exit publication never scans or reclaims.
-
-## Results and exit
-
-Every spawn/resume, including detach, is recorded before requesting startup. Blocked or uncertain startup keeps its record and pane inspectable; only confirmed ready peers with matching native session identities receive the task.
-
-Only internal **CLI launch flags**, bound to the current session path, grant automatic exit. They are not inherited by the pane shell: manually launching pi—even on the same session—does not auto-exit. Switching sessions loses qualification; same-session reload retains it.
-
-Non-interrupted settled work exits only while idle, with no pending input, an empty editor and zero pending runs. Escape cancels the exit candidate until the next run; submitted input and arriving results invalidate it too. Provider errors are archived. The peer synchronously writes its final reply to the board, then shuts down and closes only its current pane after shutdown hooks. Write failure leaves it open without retry. Detach writes to `*` and neither waits nor sends a result to the spawner.
-
-One herdr list snapshot supervises all waiting **session paths**, even after names disappear or change. Unknown identities keep waits open and block resume. Ended runs are read without modifying their session files; only the last new assistant reply after the recorded active-branch boundary is used. Empty, erroneous and unreadable results are reported honestly. Blocked transitions report once with the current pane.
-
-The result is a structured `swarm_result` with `triggerTurn: false`; a separate body-free follow-up notice wakes the spawner. Results are never re-enqueued. Active-branch spawn/result entries restore waits after restart. Pending work remains until the result is appended **and a subsequent normal assistant reply finishes**, so Escape may cancel the notice but does not silently release unfinished result processing. Hosts and this extension use the same live counter:
+Your waits survive restarts: they are derived from your own session. A host extension that auto-exits can read the same pending count:
 
 ```typescript
 const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?.() ?? 0;
 ```
 
-## Three contracts
+## Presets
 
-1. **Boundary:** one local herdr instance. Projects mean canonical Git roots; outside Git, canonical cwd. Worktrees, nested repositories and submodules are separate. Startup/supervision depend on herdr's pi integration reporting session identity. `PI_SWARM_MAX_AGENTS` defaults to **16**, a positive integer. Target-project admission counts unnamed/starting agents and refuses uncertain counts: a precheck, **not a strict concurrent limit**.
-2. **Names, submission, TTL:** names are online addresses and may disappear while running. Submitted means terminal bytes written—not read or processed. A recipient's last exit window may miss processing; delivery is not guaranteed exactly once. TTL is retention, not a deadline, completion or cancellation.
-3. **Permissions:** roles grant no permissions. Actions with side effects—writing the same file or calling an external system—should have one executor; research/analysis can run in parallel. This is a usage convention; hard guarantees belong to the host.
+Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `model`, `thinking`, `cwd`, `skills`, and a system prompt body (`system-prompt: append | replace`). Presets configure; they never restrict tools or extensions. Without a preset, a peer inherits your current model and thinking.
 
-## Checks
+```markdown
+---
+name: reviewer
+description: Careful code review
+thinking: high
+system-prompt: append
+---
+Report actionable findings with file paths.
+```
+
+## The board
+
+`<git root>/.pi/swarm/board/` holds one Markdown file per message, readable with `cat` and `grep`. Messages are at most 4000 characters (put longer work in a file and send its path) and are kept for 24 hours.
+
+## Contracts
+
+1. **Scope.** One local herdr instance. A project is a Git root (or the cwd outside Git); worktrees and nested repositories are separate projects. `PI_SWARM_MAX_AGENTS` (default 16) caps spawning per project as a precheck, not a strict limit under concurrency.
+2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed. The board's 24 hours is retention, not a deadline.
+3. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
+
+## Development
 
 ```sh
 npm install --ignore-scripts
-npm run check
-npm test
-# Inside herdr: owns and cleans a private server; no external model requests:
-node test/e2e.ts
+npm run check && npm test
+node test/e2e.ts   # inside herdr: a private server, no model requests
 ```
-
-Fake herdr checks outcome mapping and startup boundaries; real AgentSession checks lifecycle ordering and result persistence; the isolated demo checks native connections and delivery. The demo creates and cleans only its own workspace.
