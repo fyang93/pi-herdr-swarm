@@ -61,7 +61,7 @@ function noteLines(note: Note, width: number, expanded: boolean, theme: Theme): 
   const now = Date.now();
   const head = theme.fg("accent", `${theme.bold(note.from)} → ${theme.bold(note.to)}`) + theme.fg("dim", ` · [${note.kind}]`);
   const age = note.created > now ? `in ${duration(note.created - now)}` : `${duration(now - note.created)} ago`;
-  const meta = theme.fg("dim", [...note.tags.map(tag => `#${tag}`), age].join(" · ")) + theme.fg("dim", " · ") + expiry(note, theme);
+  const meta = theme.fg("dim", age) + theme.fg("dim", " · ") + expiry(note, theme);
   const header = visibleWidth(`${head} · ${meta}`) <= width ? `${head}${theme.fg("dim", " · ")}${meta}` : `${head}\n${meta}`;
   return [...textLines(header, width), ...(expanded
     ? new Markdown(note.message, 0, 0, getMarkdownTheme(), { color: text => theme.fg("toolOutput", text) }).render(width)
@@ -78,12 +78,12 @@ function resultView(expanded: boolean, partial: boolean, theme: Theme, lines: (w
 
 export const spawnResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { name: string; pane: string; detached: boolean } | undefined;
-  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · started · ${data.pane}${data.detached ? " · detached, board only" : ""}`) : theme.fg("toolOutput", output(result)), width);
+  const data = result.details as { name: string; pane: string; detached: boolean; resumed?: boolean } | undefined;
+  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}${data.detached ? " · detached, board only" : ""}`) : theme.fg("toolOutput", output(result)), width);
 });
 export const sendResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   const data = result.details as { board: string; note: Note; deliveries: Delivery[]; boardOnly: boolean; discovery?: Omit<Delivery, "to"> } | undefined;
-  if (!data) return textLines(theme.fg(context.isError ? "error" : "toolOutput", output(result)), width);
+  if (!Array.isArray(data?.deliveries)) return textLines(theme.fg(context.isError ? "error" : "toolOutput", output(result)), width);
   const count = (status: Delivery["status"]) => data.deliveries.filter(d => d.status === status).length;
   const lines = textLines(data.boardOnly ? theme.fg("success", "posted · board only") : theme.fg("dim", `${data.deliveries.length} recipients · ${count("submitted")} submitted · ${count("rejected")} rejected · ${count("unknown")} unknown`), width);
   for (const delivery of data.deliveries) {
@@ -110,13 +110,26 @@ export const listResult: Renderer = (result, options, theme, context) => resultV
 });
 export const boardResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { notes: Note[] } | undefined;
+  const data = result.details as { notes: Note[]; skipped?: string[] } | undefined;
   if (!data) return textLines(theme.fg("toolOutput", output(result)), width);
   const lines = textLines(theme.fg("dim", `${data.notes.length} ${data.notes.length === 1 ? "note" : "notes"}`), width);
   for (const note of data.notes) lines.push(...noteLines(note, width, options.expanded, theme));
   if (!data.notes.length) lines.push(...textLines(theme.fg("dim", "No unexpired messages."), width));
+  for (const warning of data.skipped || []) lines.push(...textLines(theme.fg("warning", warning), width));
   return lines;
 });
+
+export function resultMessageView(content: string, details: { name: string; session: string; status: string } | undefined, expanded: boolean, theme: Theme): Component {
+  const box = new Box(1, 1, line => theme.bg("customMessageBg", line));
+  box.addChild({ invalidate() {}, render(width) {
+    if (width < 1) return [];
+    const color = details?.status === "error" || details?.status === "unreadable" ? "error" : details?.status === "reply" ? "dim" : "warning";
+    const header = theme.fg("toolTitle", theme.bold("result ")) + theme.fg("accent", details?.name || "peer") + theme.fg(color, ` · ${details?.status || "unknown"}`);
+    const body = details ? content.split("\n").slice(2).join("\n") : content;
+    return bounded([...textLines(header, width), ...new Markdown(body, 0, 0, getMarkdownTheme(), { color: text => theme.fg("toolOutput", text) }).render(width), ...textLines(theme.fg("dim", details?.session || ""), width)], width, expanded);
+  } });
+  return box;
+}
 
 export function noticeView(text: string, expanded: boolean, theme: Theme): Component {
   const box = new Box(1, 1, line => theme.bg("customMessageBg", line));

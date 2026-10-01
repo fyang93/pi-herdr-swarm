@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { readFileSync, appendFileSync, writeFileSync } = require('node:fs');
+const { readFileSync, appendFileSync, writeFileSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 const args = process.argv.slice(2);
 const dir = process.env.FAKE_HERDR_DIR;
@@ -29,23 +29,25 @@ if (key === 'agent list') {
   ok({ agent: own });
 } else if (key === 'pane current') ok({ pane: { pane_id: 'w1:p1' } });
 else if (key === 'pane layout') ok({ layout: state.layout });
-else if (key === 'pane split') ok({ pane: { pane_id: 'w1:p9' } });
-else if (key === 'tab create') ok({ root_pane: { pane_id: 'w1:p8' } });
+else if (key === 'pane split') { state.lastCwd = args[args.indexOf('--cwd') + 1]; save(); ok({ pane: { pane_id: 'w1:p9' } }); }
+else if (key === 'tab create') { state.lastCwd = args[args.indexOf('--cwd') + 1]; save(); ok({ root_pane: { pane_id: 'w1:p8' } }); }
 else if (key === 'agent start') {
+  if (state.checkRecord) {
+    const entries = readFileSync(state.checkRecord, 'utf8').trim().split('\n').map(JSON.parse);
+    if (!entries.some(e => e.type === 'custom' && e.customType === 'swarm_spawn' && e.data.name === args[2] && e.data.session === args[args.indexOf('--session') + 1])) fail('not_recorded', 'startup preceded spawn record');
+  }
   if (state.startError) fail(state.startError, 'start failed');
   const i = args.indexOf('--session');
-  state.agents.push({ name: args[2], pane_id: args[args.indexOf('--pane') + 1], agent: 'pi', agent_status: 'idle', agent_session: { kind: 'path', value: i >= 0 ? args[i + 1] : '/tmp/test-session.jsonl' } });
+  state.agents.push({ name: args[2], pane_id: args[args.indexOf('--pane') + 1], agent: 'pi', cwd: state.lastCwd || dir, agent_status: 'idle', agent_session: { kind: 'path', value: i >= 0 ? args[i + 1] : '/tmp/test-session.jsonl' } });
   save(); ok({});
 } else if (key === 'agent prompt') {
   if (state.checkBoard) {
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(state.checkBoard);
-    const note = db.prepare('SELECT * FROM notes ORDER BY rowid DESC LIMIT 1').get();
-    db.close();
-    if (!note || !args[3].includes(note.message) || !args[3].includes(state.checkBoard)) fail('not_persisted', 'notification preceded board write or missing source path');
+    const bodies = readdirSync(state.checkBoard).filter(f => f.endsWith('.md')).map(f => readFileSync(join(state.checkBoard, f), 'utf8').split('\n---\n')[1]);
+    if (!bodies.some(body => body && args[3].includes(body))) fail('not_persisted', 'notification preceded board write');
   }
   const finish = () => {
     if (state.promptError || args[2] === 'blocked') fail(state.promptError || 'agent_blocked', 'prompt failed');
+    if (!state.agents.some(a => a.name === args[2])) fail('agent_not_found', 'not online');
     ok({ type: 'agent_prompted' });
   };
   if (state.delay) setTimeout(finish, state.delay); else finish();

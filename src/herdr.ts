@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 import { realpath } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { post, formatNote, type Note } from "./board.ts";
 
 const exec = promisify(execFile);
@@ -42,12 +43,23 @@ export async function projectRoot(cwd: string): Promise<string> {
 }
 export async function inProject(agent: LiveAgent, project: string, roots: Map<string, string>): Promise<boolean> {
   const cwd = agent.cwd || agent.foreground_cwd;
-  if (!agent.name || !cwd) return false;
+  if (!cwd) throw new Error(`Project cwd unknown for pane ${agent.pane_id}.`);
   const canonical = await realpath(cwd);
   if (!roots.has(canonical)) roots.set(canonical, await projectRoot(canonical));
   return roots.get(canonical) === project;
 }
-export async function list(): Promise<LiveAgent[]> { return (await herdr(["agent", "list"])).agents; }
+export async function list(): Promise<LiveAgent[]> {
+  const agents = (await herdr(["agent", "list"]))?.agents;
+  if (!Array.isArray(agents) || agents.some(a => !a || typeof a.pane_id !== "string")) throw new Error("Malformed herdr agent list reply; state unknown.");
+  return agents;
+}
+export function sessionPath(path: string): string {
+  try { return realpathSync(path); } catch (error: any) { if (error.code === "ENOENT") return resolve(path); throw error; }
+}
+export function sessionBinding(agents: LiveAgent[], session: string): LiveAgent | undefined {
+  if (agents.some(a => a.agent_status === "starting" || ((a.agent === "pi" || a.agent === "starting") && (a.agent_session?.kind !== "path" || typeof a.agent_session.value !== "string" || !a.agent_session.value)))) throw new Error("herdr session bindings unknown; still waiting.");
+  return agents.find(a => a.agent_session?.kind === "path" && sessionPath(a.agent_session.value) === sessionPath(session));
+}
 export async function get(name: string): Promise<LiveAgent | undefined> {
   try {
     const agent = (await herdr(["agent", "get", name]))?.agent;
@@ -70,38 +82,23 @@ export function validateName(name: string): string {
   if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
   return name;
 }
-export function availableName(base: string, agents: LiveAgent[]): string {
+export function availableName(base: string, agents: LiveAgent[], history: Iterable<string> = []): string {
   base = base.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z]+/, "").slice(0, 26) || "swarm";
-  let name = base;
-  for (let n = 2; agents.some(a => a.name === name); n++) name = `${base}-${n}`;
-  return name;
+  const used = new Set([...agents.map(a => a.name), ...history]);
+  for (let n = 1; ; n++) { const name = `${base}-${n}`; if (!used.has(name)) return name; }
 }
-export function identity(named?: (name: string) => void): Promise<string> {
-  // ponytail: share the local creation queue; split naming out if ready-waits delay sends. herdr owns uniqueness.
-  const next = creationQueue.then(async () => {
+export async function identity(named?: (name: string) => void): Promise<string> {
     requireHerdr();
     const pane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
-    for (;;) {
-      const own = await get(pane);
-      if (!own) throw new Error("herdr does not recognize pi in the caller's pane.");
-      if (own.name) return validateName(own.name);
-      const name = availableName("swarm", await list());
-      try {
-        await herdr(["agent", "rename", pane, name]);
-      } catch (error) {
-        const confirmed = await get(pane);
-        if (confirmed?.name) { named?.(confirmed.name); return validateName(confirmed.name); }
-        if (error instanceof HerdrError && ["agent_name_taken", "name_taken"].includes(error.code)) continue;
-        throw error; // An uncertain rename is never blindly repeated.
-      }
-      const confirmed = await get(pane);
-      if (!confirmed?.name) throw new Error("herdr did not confirm the agent name; inspect the caller pane before retrying.");
-      named?.(confirmed.name);
-      return validateName(confirmed.name);
-    }
-  });
-  creationQueue = next.catch(() => {});
-  return next;
+    const own = await get(pane);
+    if (!own) throw new Error("herdr does not recognize pi in the caller's pane.");
+    if (own.name) return validateName(own.name);
+    const name = validateName(`swarm-${pane.replace(":", "-").toLowerCase()}`);
+    const confirmed = (await herdr(["agent", "rename", pane, name])).agent;
+    if (confirmed?.pane_id !== pane || !confirmed.name) throw new Error("herdr did not confirm the agent name; inspect the caller pane.");
+    const actual = validateName(confirmed.name);
+    named?.(actual);
+    return actual;
 }
 
 export function addressPattern(address: string): RegExp | undefined {
@@ -110,17 +107,18 @@ export function addressPattern(address: string): RegExp | undefined {
   return new RegExp(`^${address.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, ".*")}$`);
 }
 export interface Delivery { to: string; status: "submitted" | "rejected" | "unknown"; code?: string; error?: string }
-function failure(error: unknown): Omit<Delivery, "to"> {
+export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
+  if (error === undefined) return { status: "submitted" };
   const code = error instanceof HerdrError ? error.code : (error as any)?.code;
   const rejected = ["agent_not_found", "not_found", "agent_blocked", "agent_not_ready", "invalid_params", "unsupported_agent"].includes(code);
   return { status: rejected ? "rejected" : "unknown", code: typeof code === "string" ? code : undefined, error: String(error) };
 }
 /** Commit before discovery and native steer (text + Enter). Never replay an uncertain submission. */
-export async function send(path: string, input: Pick<Note, "from" | "message"> & Partial<Pick<Note, "to" | "tags" | "kind">>, ttl?: number, project?: { root: string; roots: Map<string, string> }) {
+export async function send(path: string, input: Pick<Note, "from" | "message"> & Partial<Pick<Note, "to" | "kind">>, project?: { root: string; roots: Map<string, string> }, report?: (warning: string) => void) {
   const board = resolve(path);
   const boardOnly = input.to === undefined;
   const pattern = boardOnly ? undefined : addressPattern(input.to!);
-  const note = post(board, { ...input, to: input.to ?? "*" }, ttl);
+  const note = await post(board, { ...input, to: input.to ?? "*" }, report);
   const deliveries: Delivery[] = [];
   if (boardOnly) return { board, note, deliveries, boardOnly };
   let targets: string[];
@@ -132,14 +130,13 @@ export async function send(path: string, input: Pick<Note, "from" | "message"> &
       for (const agent of agents) if (await inProject(agent, scope.root, scope.roots)) targets.push(agent.name!);
     } else targets = [input.to!];
   } catch (error) {
-    return { board, note, deliveries, boardOnly, discovery: failure(error) };
+    return { board, note, deliveries, boardOnly, discovery: deliveryOutcome(error) };
   }
   deliveries.push(...await Promise.all(targets.map(async (to): Promise<Delivery> => {
     try {
-      if (!await get(to)) throw new HerdrError("agent_not_found", `Agent ${to} is not addressable.`);
-      await prompt(to, formatNote(note, board));
-      return { to, status: "submitted" };
-    } catch (error) { return { to, ...failure(error) }; }
+      await prompt(to, formatNote(note));
+      return { to, ...deliveryOutcome() };
+    } catch (error) { return { to, ...deliveryOutcome(error) }; }
   })));
   return { board, note, deliveries, boardOnly };
 }
@@ -150,22 +147,36 @@ export function splitDirection(width: number, height: number): "right" | "down" 
   return (height * 2 > width ? ["down", "right"] as const : ["right", "down"] as const).find(d => fits[d]);
 }
 let creationQueue: Promise<unknown> = Promise.resolve();
-export function start(launch: { name: string; cwd: string; args: string[]; env: Record<string, string>; task: string }): Promise<{ name: string; pane: string }> {
+export function start(launch: { name: string; cwd: string; args: string[]; env: Record<string, string>; task: string; session?: string; resume?: boolean; maxAgents?: number; beforeStart?: (pane: string) => void }): Promise<{ name: string; pane: string }> {
   // Local layout serialization, not a distributed name claim. herdr enforces uniqueness.
   const next = creationQueue.then(async () => {
     requireHerdr();
     validateName(launch.name);
-    if ((await list()).some(a => a.name === launch.name)) throw new Error(`Agent ${launch.name} is already live.`);
-    const parent = (await herdr(["pane", "current", "--current"])).pane.pane_id;
-    const { layout } = await herdr(["pane", "layout", "--pane", parent]);
-    const own = !layout.zoomed && layout.panes.find((p: any) => p.pane_id === parent);
+    const agents = await list();
+    if (agents.some(a => a.name === launch.name)) throw new Error(`Agent ${launch.name} is already live.`);
+    if (launch.resume && launch.session && sessionBinding(agents, launch.session)) throw new Error(`Session is already live: ${launch.session}`);
+    const max = launch.maxAgents ?? 16;
+    if (!Number.isSafeInteger(max) || max <= 0) throw new Error("PI_SWARM_MAX_AGENTS must be a positive integer.");
+    const target = await projectRoot(launch.cwd);
+    let count = 0;
+    const roots = new Map<string, string>();
+    for (const agent of agents) if (await inProject(agent, target, roots)) count++;
+    if (count >= max) throw new Error(`Agent admission refused: ${count}/${max} online in ${target}.`);
+    const callerPane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
+    const { layout } = await herdr(["pane", "layout", "--pane", callerPane]);
+    const own = !layout.zoomed && layout.panes.find((p: any) => p.pane_id === callerPane);
     const direction = own && splitDirection(own.rect.width, own.rect.height);
     const env = Object.entries(launch.env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
     const pane: string = direction
-      ? (await herdr(["pane", "split", parent, "--direction", direction, "--no-focus", "--cwd", launch.cwd, ...env])).pane.pane_id
+      ? (await herdr(["pane", "split", callerPane, "--direction", direction, "--no-focus", "--cwd", launch.cwd, ...env])).pane.pane_id
       : (await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID!, "--no-focus", "--label", launch.name, "--cwd", launch.cwd, ...env])).root_pane.pane_id;
     try {
+      launch.beforeStart?.(pane);
       await herdr(["agent", "start", launch.name, "--kind", "pi", "--pane", pane, "--timeout", "60000", "--", ...launch.args], 70_000);
+      if (launch.session) {
+        const agent = await get(launch.name);
+        if (agent?.agent_session?.kind !== "path" || sessionPath(agent.agent_session.value) !== sessionPath(launch.session)) throw new Error(`Session identity unavailable or mismatched for ${launch.name}; expected ${launch.session}`);
+      }
       await prompt(launch.name, launch.task);
       return { name: launch.name, pane };
     } catch (error) {
@@ -173,9 +184,9 @@ export function start(launch: { name: string; cwd: string; args: string[]; env: 
       if (error instanceof HerdrError && ["agent_start_failed", "agent_name_taken"].includes(error.code)) {
         const output = await herdr(["pane", "read", pane, "--lines", "20"], 10_000, true).catch(() => "");
         await herdr(["pane", "close", pane]).catch(() => {});
-        throw new Error(`${error.message}\n${output}`);
+        throw new Error(`${error.message}; pane ${pane}; session ${launch.session || "unspecified"}\n${output}`);
       }
-      throw new Error(`${String(error)}; pane ${pane} kept for inspection. Task may or may not have been submitted; do not blindly retry.`);
+      throw new Error(`${String(error)}; pane ${pane} kept for inspection; session ${launch.session || "unspecified"}. Task may or may not have been submitted; do not blindly retry.`);
     }
   });
   creationQueue = next.catch(() => {});
