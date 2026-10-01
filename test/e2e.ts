@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { readBoard } from "../pi-extension/board.ts";
+import { readBoard } from "../src/board.ts";
 
 assert.equal(process.env.HERDR_ENV, "1", "Run inside herdr.");
 const session = process.argv[2];
@@ -33,7 +33,7 @@ try {
   workspace = created.workspace.workspace_id; pane = created.root_pane.pane_id;
   await cli(["agent", "start", "demo-root", "--kind", "pi", "--pane", pane!, "--timeout", "60000", "--",
     "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-themes", "--approve", "--model", model, "--thinking", "low",
-    "-e", resolve("pi-extension/index.ts"), "-e", join(process.env.HOME!, ".pi/agent/extensions/herdr-agent-state.ts"),
+    "-e", resolve("src/index.ts"), "-e", join(process.env.HOME!, ".pi/agent/extensions/herdr-agent-state.ts"),
     "--session", join(rootRun, "session.jsonl"), "--tools", "swarm_spawn,swarm_send,swarm_list,swarm_board,bash"], 70_000);
   const taskA = "First bash sleep 35. Then swarm_send to demo-b message 'A_DIRECT' tags ['e2e'] ttl 600. Then swarm_send to '*' message 'A_BROADCAST' tags ['e2e'] ttl 600. Then swarm_board message 'TTL_PROBE' tags ['expiry'] ttl 1. Then bash sleep 45. Finally give a one-line summary. Notifications are informational; do not echo or rebroadcast them.";
   const taskB = "First bash sleep 20. Then swarm_send to demo-a message 'B_DIRECT' tags ['e2e'] ttl 600. Then bash sleep 65. Finally give a one-line summary. Notifications are informational; do not echo or rebroadcast them.";

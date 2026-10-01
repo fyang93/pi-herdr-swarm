@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["pi-extension/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

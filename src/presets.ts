@@ -6,10 +6,10 @@ import { fileURLToPath } from "node:url";
 
 export const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
 const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
-export interface Profile { name: string; description: string; body: string; fields: Record<string, unknown> }
-export function profiles(cwd: string, trusted: boolean): Profile[] {
-  const found = new Map<string, Profile>();
-  for (const dir of [fileURLToPath(new URL("../agents/", import.meta.url)), join(agentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
+export interface Preset { name: string; description: string; body: string; fields: Record<string, unknown> }
+export function presets(cwd: string, trusted: boolean): Preset[] {
+  const found = new Map<string, Preset>();
+  for (const dir of [join(agentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
     if (!existsSync(dir)) continue;
     for (const file of readdirSync(dir).filter(f => f.endsWith(".md")).sort()) {
       const { frontmatter, body } = parseFrontmatter(readFileSync(join(dir, file), "utf8"));
@@ -21,21 +21,24 @@ export function profiles(cwd: string, trusted: boolean): Profile[] {
 }
 const csv = (value: unknown) => String(value ?? "").split(",").map(s => s.trim()).filter(Boolean);
 
-export function loadout(profile: Profile, runDir: string, cwd: string, task: string, model?: string): { args: string[]; task: string; autoExit: boolean } {
-  const f = profile.fields;
+export function loadout(preset: Preset | undefined, runDir: string, cwd: string, task: string, parent: { model?: string; thinking: string; tools: string[] }, model?: string): { args: string[]; task: string; autoExit: boolean; tools: string[]; session: string } {
+  const f = preset?.fields ?? {};
   if (f.cli && f.cli !== "pi") throw new Error("Only pi agent profiles are supported.");
   if (f["session-mode"] && f["session-mode"] !== "standalone") throw new Error("Swarm agents use fresh standalone sessions, not fork/lineage modes.");
-  const args = ["--session", join(runDir, "session.jsonl"), "-e", extensionPath];
-  if (model || f.model) args.push("--model", model || String(f.model));
-  if (f.thinking) args.push("--thinking", String(f.thinking));
-  const tools = csv(f.tools);
-  if (tools.length) args.push("--tools", [...new Set([...tools, "swarm_spawn", "swarm_send", "swarm_list", "swarm_board"])].join(","));
-  if (profile.body && f["system-prompt"]) {
+  const session = join(runDir, "session.jsonl");
+  const args = ["--session", session, "-e", extensionPath];
+  const selectedModel = model ?? (f.model === undefined ? parent.model : String(f.model));
+  if (!selectedModel) throw new Error("Select a model before spawning a peer.");
+  args.push("--model", selectedModel, "--thinking", String(f.thinking ?? parent.thinking));
+  // pi clamps thinking to the selected model's capabilities on startup.
+  const tools = f.tools === undefined ? parent.tools : csv(f.tools);
+  args.push(...(tools.length ? ["--tools", tools.join(",")] : ["--no-tools"]));
+  if (preset?.body && f["system-prompt"]) {
     if (!["append", "replace"].includes(String(f["system-prompt"]))) throw new Error("system-prompt must be append or replace.");
     const path = join(runDir, "system.md");
-    writeFileSync(path, profile.body);
+    writeFileSync(path, preset.body);
     args.push(f["system-prompt"] === "replace" ? "--system-prompt" : "--append-system-prompt", path);
-  } else if (profile.body) task = `${profile.body}\n\n${task}`;
+  } else if (preset?.body) task = `${preset.body}\n\n${task}`;
   const requested = csv(f.skills ?? f.skill);
   if (requested.length) {
     const { skills } = loadSkills({ cwd, agentDir: agentDir(), skillPaths: [], includeDefaults: true });
@@ -48,8 +51,8 @@ export function loadout(profile: Profile, runDir: string, cwd: string, task: str
     task = `${blocks.join("\n\n")}\n\n${task}`;
   }
   if (f["auto-exit"] !== undefined && typeof f["auto-exit"] !== "boolean") throw new Error("auto-exit must be a boolean.");
-  return { args, task, autoExit: f["auto-exit"] !== false };
+  return { args, task, autoExit: f["auto-exit"] !== false, tools, session };
 }
-export function profileCwd(profile: Profile, callerCwd: string, override?: string): string {
-  return resolve(callerCwd, override ?? String(profile.fields.cwd ?? "."));
+export function presetCwd(preset: Preset | undefined, callerCwd: string, override?: string): string {
+  return resolve(callerCwd, override ?? String(preset?.fields.cwd ?? "."));
 }

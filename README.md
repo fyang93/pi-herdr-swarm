@@ -1,90 +1,97 @@
 # pi-herdr-swarm
 
-Named peer agents for [pi](https://pi.dev) inside [herdr](https://herdr.dev). Four tools, an expiring shared board, no claim/lease/acknowledgement protocol. Spawning is a convention, not a permission hierarchy.
+Named pi peers inside [herdr](https://herdr.dev): four tools and an expiring shared board. No claims, leases, receipts or membership registry. Names describe roles, not permissions.
 
-Requires Node **22.19+**, pi with `agent_settled` / `agent_before_settle`, and herdr **0.9+**. Install herdr's pi state integration (`herdr integration install pi`), then start pi inside herdr.
+Requires Node **22.19+**, pi with `agent_settled` / `agent_before_settle`, and herdr **0.9+**. Start pi inside herdr. This extension does **not** install herdr's pi state integration; install and verify it first:
 
 ```sh
+herdr integration install pi
+herdr integration status
 pi install git:github.com/fyang93/pi-herdr-swarm
-# Or try this checkout without installing:
-pi -e ./pi-extension/index.ts
+# Or load this checkout:
+pi -e ./src/index.ts
 ```
 
-## Tools
+## Four tools
 
-| Tool | What it does |
+| Tool | Responsibility |
 | --- | --- |
-| `swarm_spawn({agent, task, name?, model?, cwd?})` | Start a peer from an agent definition. Returns once ready; the task identifies its spawner. |
-| `swarm_send({to, message, tags?, ttl?})` | Commit a message to the board, then notify recipients through `herdr agent prompt`. Reports each actual recipient's submission or failure; never automatically retries. |
-| `swarm_list()` | List herdr's current agents: name, status, pane; also list available definitions. Unlisted does **not** prove completion or a crash. |
-| `swarm_board({from?, to?, tag?, limit?})` | Read all recent unexpired board messages, newest first. No notifications. Add `message`, optional `tags`, `ttl` and `to` to post without notifying anyone. |
+| `swarm_spawn({task, agent?, name?, model?, cwd?, detach?})` | Start a fresh peer; role goes in task. Optional agent selects a preset. Default waits for this run's binding to end; detach does not wait and its result is board-only. |
+| `swarm_send({message, to?, tags?, ttl?})` | The only write tool. Omit to: **posted · board only**, no wakeup. Explicit to: commit, then native herdr steer (text + Enter). |
+| `swarm_list()` | Read current agents and available presets. No automatic naming. |
+| `swarm_board({from?, to?, tag?, limit?})` | Read unexpired messages; no writes, wakeups or naming. |
 
 ```typescript
-swarm_spawn({ agent: "worker", name: "auth-review", task: "Review auth; send findings." });
+swarm_spawn({ name: "auth-review", task: "You are a reviewer. Inspect auth and report findings." });
 swarm_send({ to: "auth-review", message: "Also inspect token expiry.", tags: ["auth"] });
-swarm_send({ to: "*news*", message: "Research update: see reports/news.md", tags: ["research"] });
+swarm_send({ message: "Research update: see reports/news.md", tags: ["research"] }); // board only
+swarm_send({ to: "*news*", message: "Please inspect the research update." }); // explicit group steer
+swarm_spawn({ name: "research", task: "Write findings to reports/research.md.", detach: true });
 swarm_board({ from: "auth-review", tag: "result", limit: 10 });
 ```
 
-**Addressing:** an exact name may cross projects. A pattern containing `*` matches whole names in the current project subtree only (`news*`, `*news*`, `us-*-1`, `*`). Consecutive stars collapse; no `?`, brackets, or other glob syntax. Patterns exclude the sender and unnamed panes. Names do not imply roles or permissions; use message tags for topics. Group sends wake every recipient and consume their tokens.
+Names must match `[a-z][a-z0-9_-]{0,31}`. Only send/spawn may automatically name an unnamed caller; existing names are never overwritten. The confirmed name is shown to the user. Ambiguous naming failures recheck the caller pane rather than blindly retrying.
 
-**TUI:** action-labelled calls show a short preview; tool results use pi's own shell and collapse to at most eight display rows. Expand with your configured pi tool-output key. Board headers show sender, recipient, type, tags and relative lifetime; agent badges preserve herdr's real state, with unlisted/unknown shown as warnings.
+**Addressing:** exact names are best-effort, including across projects on the same herdr instance. `*` anywhere matches the whole name (`news*`, `*news*`, `us-*-1`, `*`); repeated stars collapse, no other glob syntax. Group sends select only named agents in the same canonical project and exclude the sender. Each actual recipient is reported individually; no automatic replies, rebroadcasts or delivery retries.
 
-**Submission is not acknowledgement.** Busy pi agents queue input; blocked dialogs or unavailable agents produce errors. A timeout may mean an uncertain delivery: inspect, don't blindly resend. A failed private message still remains on the board. The board is shared, **not confidential**.
+**Delivery states:** `submitted` means text and Enter were written to the terminal, **not** that the peer processed or read them. `rejected` is an explicit refusal (for example `agent_blocked`); `unknown` covers timeouts, disconnected connections, server errors and malformed replies. Error codes and the source board path are retained. Busy pi agents receive native steer; this extension does not swallow input or requeue it as follow-up. If no interruption is needed, omit to.
 
-## Board metabolism
+The board is shared, **not confidential**. A message's validated envelope identifies its source; neither header nor body grants authorization or clears a waiting run.
 
-Default file: `.pi/swarm/board.sqlite` in the spawning project. Set `PI_SWARM_BOARD` to choose another file; relative paths resolve from the root caller's cwd and peers inherit the absolute path. SQLite is Node's native implementation, with cross-process writes and a bounded busy timeout; no extra runtime dependency.
+## Projects and board retention
 
-- Message body limit: **4000 characters**, shared by send and board posts. Longer work belongs in a report file; send a summary and its path.
-- `ttl` is positive seconds, default **24 hours**, at most 365 days. `kind=result` expires identically.
-- Reads return only valid messages (default 20, maximum 100). Model-facing text is capped at 30,000 characters; narrow filters if truncated.
-- Expired rows are deleted on reads/writes, including idle spawner checks. A dormant file is cleaned on its next access; this is not a permanent archive. Expiry is neither success nor failure.
-- No per-sender eviction: unread final results are not discarded merely because someone posts more messages. Save lasting deliverables in report files.
+Project root is the real path returned by `git rev-parse --show-toplevel` from the canonical cwd. Outside Git, it is the canonical cwd itself. Missing Git, timeouts and other resolution failures are errors, not a fallback to “not Git.” Each nested repository, submodule and worktree has its own root; common Git directories do not merge projects. Own root is resolved at session startup; peers' roots are cached by canonical cwd for that session.
 
-`PI_SWARM_PROJECT` sets the broadcast project subtree; otherwise the root caller's cwd is used and inherited by peers. A custom board path does not register members or change broadcast scope.
+Default board: `<project-root>/.pi/swarm/board.sqlite`. SQLite provides concurrent local writes and a bounded busy timeout, without an added dependency or file-lock protocol. `PI_SWARM_BOARD` overrides storage (relative paths resolve from project root) and can be inherited explicitly; it does **not** alter broadcast membership. Cross-project spawn does not inherit the parent's default board.
 
-## Agent definitions
+An exact cross-project send remains on its **source** board. The envelope includes that absolute path, also shown in failure results. The recipient's ordinary `swarm_board()` does not automatically see it; inspect the source SQLite file or agree on an explicit shared `PI_SWARM_BOARD`.
 
-Bundled `agents/worker.md`; global `~/.pi/agent/agents/*.md` (or `PI_CODING_AGENT_DIR/agents`); trusted project `.pi/agents/*.md`. Project definitions override global, which override bundled.
+- Bodies: **4000 characters**. Larger work belongs in a file; send a summary and path.
+- Retention: positive seconds, default **24 hours**, maximum 365 days; automatic results expire too.
+- TTL is **not** a task deadline. Expiry neither cancels work nor implies completion.
+- Reads: newest first, default 20, maximum 100; model-facing text capped at 30,000 characters. Expired rows are deleted on reads/writes; dormant boards are cleaned on their next access.
+- Filters are exact. In particular `to` matches the **original target field**, not a personal inbox or expanded group membership.
+
+**TUI:** explicit action titles and short call previews; pi's native tool shell; collapsed results bounded to eight display rows with the configured expansion key. Each tool owns its result renderer. Board/send show relative retention; the one-line waiting widget does not duplicate herdr's sidebar.
+
+## Optional presets
+
+No bundled worker is required. Presets come from `~/.pi/agent/agents/*.md` (or `PI_CODING_AGENT_DIR/agents`) and trusted project `.pi/agents/*.md`; project presets override global ones.
 
 ```markdown
 ---
-name: reviewer
-description: Read-only review
+name: read-only
+description: Read-only configuration
 model: openai-codex/gpt-5.6-luna
 thinking: low
 tools: read, grep, find, ls
 system-prompt: append
-auto-exit: true
 ---
-Review the assigned code and report actionable findings.
+Report actionable findings with file paths.
 ```
 
-Supports `name`, `description`, `model`, `thinking`, comma-separated `tools`, `skills`/`skill` from default skill directories, `cwd`, `system-prompt: append|replace`, `auto-exit`, and `disable-model-invocation`. Without a system-prompt mode the body prefixes the task. Relative cwd resolves from the caller. Swarm tools are always added to explicit tool allowlists. Extensions load normally; an allowlist is **not a security sandbox**. Trust is propagated only when the child uses the caller's exact trusted cwd; a different cwd may require user approval.
+Explicit parameters override presets; preset values override the caller's current model, thinking and selected tools. Without a preset, only these **configuration values** are inherited, not the caller's prompt or conversation history. Pi clamps thinking to the selected model. A child's unavailable requested tools are explicitly reported and task input is rejected, never silently replaced by default tools. Temporary parent extensions and their tool implementations are not copied.
 
-Sessions are fresh and standalone. `cli: claude` and fork/lineage modes are rejected. Old `subagent_agents` delegation restrictions do not apply: these are peers. Default auto-exit is true; `auto-exit: false` keeps a peer open for further messages.
+Supports model, thinking, comma-separated tools, skills/skill from default skill directories, cwd, `system-prompt: append|replace`, auto-exit and disable-model-invocation. Without a system-prompt mode, the preset body prefixes task. Relative cwd resolves from the caller. No swarm tools are forced into an explicit tool selection. Fresh standalone sessions only; other CLIs and fork/lineage modes are rejected.
 
-## Completion and waiting
+Trust is propagated only for the caller's exact trusted cwd; other directories may need user approval. **`--tools` controls call scope, not an OS sandbox.** Skills and prompts are instructions; real permission isolation belongs to the host or operating system.
 
-Normal completion runs at **`agent_settled`**, not `agent_end`: retries, recovery and pending input finish first. Esc/aborted tools leave the agent open. Autonomous agents also remain open while their own spawned peers are pending.
+## Waiting and limits
 
-The final result is committed before notification and exit. An overlong final response becomes a bounded summary plus its existing pi session path. New input during notification prevents premature shutdown; the eventual final result is distinguished by its ordinary creation timestamp. Successful autonomous agents close **their own** pane after pi's shutdown hooks; error/unknown/interrupted panes remain inspectable. Spawner shutdown/reload does not kill peers.
+A waiting run means “this invocation is still bound,” not “its result has not been consumed.” Ordinary result messages never remove it. Polling uses `herdr agent get <name>` and compares its native session path with the launch file. Not-found or a different binding ends the wait; unknown, connection failures and timeouts keep it pending. Entering blocked is reported once with a pane inspection target; code never answers the dialog. Loss of binding is **not success**; the board and existing session remain evidence to inspect.
 
-Spawners persist their own pending-run references in the pi session. Exit markers/local process checks distinguish actual exits from a missing herdr listing. A terminal exit with no valid result is reported as **unknown outcome**, not success or proof of a crash. An unconsumed latest result is recovered from the board into the spawner's session once, without retrying terminal delivery. Expired results cannot be recovered. Name reuse clears the previous run's state; do not externally rename/reuse live peer identities mid-task.
+Only the **same local herdr instance** is supported. During a bound run, do not externally rename, clear or replace its name, or use `/new` or resume another session. These change the session-path binding. Cross-machine coordination and worktree orchestration are unsupported in this first version; worktree project roots remain independent. Spawner shutdown does not kill peers. For a generator/evaluator pipeline, let the evaluator spawn the generator rather than relying on an unregistered third-party result recipient.
 
-An independent root auto-exit extension can query pending work:
+Board commit and terminal submission are **not one transaction**. Bytes submitted in a recipient's final exit window may never be processed. With no receipt protocol there is no exactly-once or reliable-processing guarantee. Unknown submission must be inspected, not automatically retried.
+
+An independent root exit extension can query local pending work:
 
 ```typescript
 const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?.() ?? 0;
-// Suppress root exit while pending > 0, and also check ctx.hasPendingMessages().
+// Also check ctx.hasPendingMessages() before exiting.
 ```
 
-## Limits
-
-Local herdr server and local filesystem only; no distributed coordinator, name claims, task leases, receipts, automatic retries, or strategy-consistency checks. Pi retains its ordinary session transcripts and internal run artifacts; the message board itself expires.
-
-For trading: parallelize **research**, but let **one agent place orders**. Multiple peers placing orders can duplicate positions or turn double-closes into unintended shorts. This is a caller convention, not enforced by the extension. This repository's demo performs no trading.
+For trading: parallelize **research**, but let **one agent place orders**. This is a caller convention, not an enforced security boundary. Tests perform no trading.
 
 ## Checks
 
@@ -92,12 +99,6 @@ For trading: parallelize **research**, but let **one agent place orders**. Multi
 npm install --ignore-scripts
 npm run check
 npm test
-
-# Optional real, isolated herdr demo; requires configured pi model credentials:
-herdr --session swarm-e2e server
-# From another herdr pane; the named session must have no workspaces:
-node test/e2e.ts swarm-e2e openai-codex/gpt-5.6-luna
-herdr session stop swarm-e2e
 ```
 
-The live demo spawns two peers, exercises private messages, broadcast, expiration, root waiting, final-result persistence despite an unavailable observer, and successful pane cleanup. It only controls its newly created isolated workspace. Do not run it against a trading session.
+Tests include SQLite concurrency, tool boundaries, Git roots, naming, delivery states, pi's native tool shell and actual AgentSession configuration. The isolated herdr demo is being updated with the lifecycle model; do not run it against a trading session.

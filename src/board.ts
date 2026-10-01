@@ -32,12 +32,18 @@ function withBoard<T>(path: string, action: (db: DatabaseSync) => T): T {
   } finally { db.close(); }
 }
 
+function validateEnvelope(input: Pick<Note, "from" | "to" | "message"> & Partial<Pick<Note, "tags" | "kind">>): void {
+  if (typeof input.from !== "string" || typeof input.to !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(input.from) || !/^(?:[a-z][a-z0-9_-]{0,31}|[a-z0-9_*-]{0,127}\*[a-z0-9_*-]{0,127})$/.test(input.to) || input.to.length > 128) throw new Error("Invalid envelope sender or target.");
+  if (input.kind !== undefined && !["message", "result"].includes(input.kind)) throw new Error("Invalid envelope kind.");
+  if (input.tags !== undefined && (!Array.isArray(input.tags) || input.tags.length > 20 || input.tags.some(t => typeof t !== "string" || !t.trim() || t.length > 80 || /[\x00-\x1f\x7f]/.test(t)))) throw new Error("Invalid envelope tags.");
+  if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Message must be nonempty.");
+  if (input.message.length > MESSAGE_LIMIT) throw new Error(`Message exceeds ${MESSAGE_LIMIT} characters; write the body to a file, then send a summary and file path.`);
+}
 export function post(path: string, input: Pick<Note, "from" | "to" | "message"> & Partial<Pick<Note, "tags" | "kind">>, ttl = DAY): Note {
   if (!Number.isFinite(ttl) || ttl <= 0 || ttl > 365 * DAY) throw new Error("ttl must be > 0 and <= 365 days (seconds).");
-  if (!input.from.trim() || !input.to.trim() || !input.message.trim()) throw new Error("Sender, recipient and message must be nonempty.");
-  if (input.message.length > MESSAGE_LIMIT) throw new Error(`Message exceeds ${MESSAGE_LIMIT} characters; write the body to a file, then send a summary and file path.`);
+  validateEnvelope(input);
   const created = Date.now();
-  const note: Note = { ...input, tags: input.tags ?? [], kind: input.kind ?? "message", created, expires: created + ttl * 1000 };
+  const note: Note = { ...input, tags: input.tags ?? [], kind: input.kind ?? "message", created, expires: created + Math.ceil(ttl * 1000) };
   withBoard(path, db => db.prepare("INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?)")
     .run(note.from, note.to, note.message, JSON.stringify(note.tags), note.kind, note.created, note.expires));
   return note;
@@ -55,7 +61,10 @@ export function readBoard(path: string, filter: { from?: string; to?: string; ta
     .map(row => ({ ...row, tags: JSON.parse(row.tags as string) }) as Note));
 }
 
-export function formatNote(note: Note): string {
+export function formatNote(note: Note, board?: string): string {
+  validateEnvelope(note);
+  if (!Number.isSafeInteger(note.created) || !Number.isSafeInteger(note.expires) || note.expires <= note.created) throw new Error("Invalid envelope timestamps.");
   return `[swarm ${note.kind}] ${note.from} → ${note.to}${note.tags.length ? ` #${note.tags.join(" #")}` : ""}\n` +
+    `${board ? `Board: ${JSON.stringify(resolve(board))}\n` : ""}` +
     `${new Date(note.created).toISOString()} · expires ${new Date(note.expires).toISOString()}\n${note.message}`;
 }

@@ -7,7 +7,7 @@
   "keywords": ["pi-package"],
   "repository": { "type": "git", "url": "https://github.com/fyang93/pi-herdr-swarm" },
   "engines": { "node": ">=22.19.0" },
-  "pi": { "extensions": ["./pi-extension/index.ts"] },
+  "pi": { "extensions": ["./src/index.ts"] },
   "scripts": { "test": "node --test test/*.test.ts", "check": "tsc --noEmit" },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
