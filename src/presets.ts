@@ -33,7 +33,7 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
   const selected = requested !== undefined ? matches.length === 1 ? matches[0] : undefined : context.model;
   if (!selected) throw new Error(`Model unavailable: ${requested || "select a model before spawning"}`);
   const level = String(f.thinking ?? thinking);
-  if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(level)) throw new Error(`Invalid thinking level: ${level}`);
+  if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) throw new Error(`Invalid thinking level: ${level}`);
   return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined };
 }
 /** pi command-line arguments that reproduce a snapshot. */

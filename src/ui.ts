@@ -44,7 +44,11 @@ export function waitingView(names: string[], statuses: Map<string, string>, them
         if (shown.length && visibleWidth(line) > width) break;
         shown.push(label);
       }
-      return [truncateToWidth(`Waiting: ${shown.join(", ")}${names.length > shown.length ? ` (+${names.length - shown.length})` : ""}`, width)];
+      // The count of hidden peers stays visible: truncate the names, not the "(+N)".
+      const more = names.length > shown.length ? ` (+${names.length - shown.length})` : "";
+      const room = width - visibleWidth(more);
+      if (room < visibleWidth("Waiting: x")) return [truncateToWidth(`Waiting: ${names.length}`, width)];
+      return [truncateToWidth(`Waiting: ${shown.join(", ")}`, room) + more];
     },
   };
 }
@@ -79,7 +83,7 @@ function resultView(expanded: boolean, partial: boolean, theme: Theme, lines: (w
 export const spawnResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
   const data = result.details as { name: string; pane: string; detached: boolean; resumed?: boolean } | undefined;
-  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}${data.detached ? " · detached, board only" : ""}`) : theme.fg("toolOutput", output(result)), width);
+  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}${data.detached ? " · detached" : ""}`) : theme.fg("toolOutput", output(result)), width);
 });
 export const sendResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   const data = result.details as { board?: string; note?: Note; deliveries: Delivery[]; boardOnly: boolean; discovery?: Omit<Delivery, "to"> } | undefined;

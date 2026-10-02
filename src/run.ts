@@ -216,6 +216,12 @@ export function lifecycle(pi: ExtensionAPI) {
     widget();
     scheduleExit();
   });
+  // /tree can leave the branch that holds the spawns: redraw from the new branch at once.
+  pi.on("session_tree", () => {
+    status(undefined);
+    widget();
+    if (pending().size) void poll();
+  });
   pi.on("session_shutdown", event => {
     active = false;
     clearInterval(pollTimer);

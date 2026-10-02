@@ -91,7 +91,8 @@ In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/setting
 
 1. **Scope.** One local herdr instance. A project is a Git root (or the cwd outside Git); worktrees and nested repositories are separate projects.
 2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed. The board's 24 hours is retention, not a deadline.
-3. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
+3. **Host.** Interactive pi (TUI). Reloading through the SDK or RPC while a turn runs is not supported: the TUI refuses it, and a result read just before could be delivered twice.
+4. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
 
 ## Development
 
