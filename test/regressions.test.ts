@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -17,7 +17,7 @@ const originalKeys = getKeybindings();
 setKeybindings(new KeybindingsManager({ ...TUI_KEYBINDINGS, "app.interrupt": { defaultKeys: "escape", description: "Interrupt" } }));
 const state = (agents: any[] = []) => { writeFileSync(join(dir, "state.json"), JSON.stringify({ agents })); writeFileSync(join(dir, "calls.jsonl"), ""); };
 after(() => { setKeybindings(originalKeys); rmSync(dir, { recursive: true, force: true }); });
-async function runtime(auto = false, extra?: ExtensionFactory, manager?: SessionManager) {
+async function runtime(auto = false, extra?: ExtensionFactory, manager?: SessionManager, flags: Record<string, string> = {}) {
   const caseDir = mkdtempSync(join(dir, "case-")); const cwd = manager?.getCwd() || caseDir;
   const sessionManager = manager || SessionManager.create(cwd, caseDir);
   const faux = fauxProvider({ provider: "swarm-test", models: [{ id: "test-model", reasoning: false }] });
@@ -26,6 +26,7 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
     extensionFactories: [pi => pi.registerProvider(faux.provider), swarm, ...(extra ? [extra] : [])] });
   await loader.reload();
   if (auto) for (const [name, value] of Object.entries({ "swarm-name": "worker", "swarm-spawner": "spawner", "swarm-session": sessionManager.getSessionFile()! })) loader.getExtensions().runtime.flagValues.set(name, value);
+  for (const [name, value] of Object.entries(flags)) loader.getExtensions().runtime.flagValues.set(name, value);
   const modelRuntime = await ModelRuntime.create({ authPath: join(caseDir, "auth.json"), modelsPath: join(caseDir, "models.json") });
   const { session } = await createAgentSession({ cwd, agentDir: caseDir, model: faux.getModel(), thinkingLevel: "xhigh", modelRuntime, resourceLoader: loader, settingsManager, sessionManager });
   let shutdowns = 0; let editor = ""; let terminalInput: ((data: string) => unknown) | undefined; let widget: any;
@@ -163,4 +164,18 @@ test("read-only session boundaries never reuse old, abandoned, empty or corrupt 
   // Navigating to a branch that holds the spawn but not its result must not wait forever.
   spawner.branch(id); spawner.appendMessage({ role: "user", content: "another path", timestamp: Date.now() });
   assert.equal(pendingRuns(spawner).size, 0); assert.equal(pendingRuns(spawner, true).size, 0);
+});
+
+test("--swarm-agent starts a session as a preset: its model, thinking and role", async () => {
+  const agents = mkdtempSync(join(dir, "agent-dir-")); const previous = process.env.PI_CODING_AGENT_DIR;
+  mkdirSync(join(agents, "agents")); process.env.PI_CODING_AGENT_DIR = agents;
+  writeFileSync(join(agents, "agents", "executor.md"), "---\nname: executor\nmodel: swarm-test/test-model\nthinking: low\n---\nYou alone write the account.");
+  const r = await runtime(false, undefined, undefined, { "swarm-agent": "executor" });
+  try {
+    let prompt = "";
+    r.faux.setResponses([async (context: any) => { prompt = JSON.stringify(context); return fauxAssistantMessage("ok"); }]);
+    await r.session.prompt("hello");
+    assert.equal(r.session.model?.id, "test-model"); assert.equal(r.session.thinkingLevel, "off"); // clamped: the faux model does not reason
+    assert.match(prompt, /You alone write the account\./); assert.deepEqual(r.errors, []);
+  } finally { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; await r.close(); }
 });

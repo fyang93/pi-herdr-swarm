@@ -30,12 +30,26 @@ export default function swarm(pi: ExtensionAPI) {
     return boardPath(project);
   }
   const name = (context: ExtensionContext) => identity(value => context.ui.notify(`This session is now named ${value}`, "info"));
+  // `pi --swarm-agent <preset>` starts any session as that preset, e.g. when a host launches it outside swarm_spawn.
+  pi.registerFlag("swarm-agent", { type: "string", description: "Start this session as a swarm preset: its model, thinking and role." });
+  let role: string | undefined;
   pi.on("session_start", async (_event, context) => {
     project = undefined;
     roots.clear();
     void ensurePiIntegration(message => context.ui.notify(message, "warning"));
     project = await projectRoot(context.cwd);
+    const agent = pi.getFlag("swarm-agent");
+    if (typeof agent !== "string" || !agent) return;
+    const preset = presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent);
+    if (!preset) return context.ui.notify(`swarm: no preset named ${agent}`, "error");
+    const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
+    const [provider, ...id] = config.model.split("/");
+    const model = context.modelRegistry.find(provider, id.join("/"));
+    if (!model || !await pi.setModel(model)) return context.ui.notify(`swarm: model ${config.model} unavailable`, "error");
+    pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
+    role = config.prompt;
   });
+  pi.on("before_agent_start", event => role ? { systemPrompt: `${event.systemPrompt}\n\n${role}` } : undefined);
   const runState = lifecycle(pi);
 
   type History = ReturnType<typeof runState.history>;
