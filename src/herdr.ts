@@ -82,6 +82,18 @@ async function prompt(to: string, text: string): Promise<void> {
   const result = await herdr(["agent", "prompt", to, text]);
   if (result?.type !== "agent_prompted") throw new Error("Malformed herdr prompt reply; submission unknown.");
 }
+/** Supervision reads each pi's session path, which herdr's pi integration reports: install it when missing. */
+export async function ensurePiIntegration(notify: (message: string) => void): Promise<void> {
+  if (process.env.HERDR_ENV !== "1") return;
+  const status = String(await herdr(["integration", "status"], 10_000, true).catch(() => ""));
+  if (/^pi: current\b/m.test(status)) return;
+  try {
+    await herdr(["integration", "install", "pi"], 30_000, true);
+    notify("Installed herdr's pi integration; pi sessions started before this report no session path until restarted.");
+  } catch (error) {
+    notify(`swarm needs herdr's pi integration; run herdr integration install pi (${String(error)})`);
+  }
+}
 export function requireHerdr(): void {
   if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) throw new Error("Start pi inside a herdr pane.");
 }

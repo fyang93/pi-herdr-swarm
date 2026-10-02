@@ -267,6 +267,18 @@ test("spawn inherits model but no tool restrictions; detach retains history with
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
+test("a missing herdr pi integration is installed once at session start", async () => {
+  reset({ integration: "pi: not installed" }); const h = await harness();
+  try {
+    await sleep(300);
+    assert.ok(calls().some(c => c[0] === "integration" && c[1] === "install" && c[2] === "pi"));
+    assert.ok(h.notices.some(n => typeof n === "string" && n.includes("Installed herdr's pi integration")));
+  } finally { await h.event("session_shutdown", { reason: "reload" }); }
+  reset(); const current = await harness();
+  try { await sleep(300); assert.equal(calls().some(c => c[0] === "integration"), false); }
+  finally { await current.event("session_shutdown", { reason: "reload" }); }
+});
+
 test("the agent cap comes from pi settings swarm.maxAgents", async () => {
   reset(); const h = await harness();
   try {

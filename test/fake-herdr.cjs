@@ -4,6 +4,9 @@ const { join } = require('node:path');
 const args = process.argv.slice(2);
 const dir = process.env.FAKE_HERDR_DIR;
 const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+// The pi integration probe runs at every session start; answer it without recording a call.
+if (args[0] === 'integration' && args[1] === 'status') { console.log(state.integration || 'pi: current (v9)'); process.exit(0); }
+if (args[0] === 'integration' && args[1] === 'install') { appendFileSync(join(dir, 'calls.jsonl'), JSON.stringify(args) + '\n'); console.log('installed'); process.exit(0); }
 appendFileSync(join(dir, 'calls.jsonl'), JSON.stringify(args) + '\n');
 const key = args.slice(0, 2).join(' ');
 if (state.malformed === key) { console.log('{"result":{}}'); process.exit(0); }

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
 import { boardPath, boardSenders, MESSAGE_LIMIT, formatNote, post, readBoard } from "./board.ts";
-import { availableName, deliver, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
+import { availableName, deliver, ensurePiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
 import { loadout, presets, snapshot } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, boardResult, noticeView, resultMessageView } from "./ui.ts";
@@ -33,6 +33,7 @@ export default function swarm(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, context) => {
     project = undefined;
     roots.clear();
+    void ensurePiIntegration(message => context.ui.notify(message, "warning"));
     project = await projectRoot(context.cwd);
   });
   const runState = lifecycle(pi);
