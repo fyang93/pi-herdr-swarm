@@ -28,11 +28,12 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
   if (auto) for (const [name, value] of Object.entries({ "swarm-name": "worker", "swarm-spawner": "spawner", "swarm-session": sessionManager.getSessionFile()! })) loader.getExtensions().runtime.flagValues.set(name, value);
   const modelRuntime = await ModelRuntime.create({ authPath: join(caseDir, "auth.json"), modelsPath: join(caseDir, "models.json") });
   const { session } = await createAgentSession({ cwd, agentDir: caseDir, model: faux.getModel(), thinkingLevel: "xhigh", modelRuntime, resourceLoader: loader, settingsManager, sessionManager });
-  let shutdowns = 0; let editor = ""; let terminalInput: ((data: string) => unknown) | undefined;
+  let shutdowns = 0; let editor = ""; let terminalInput: ((data: string) => unknown) | undefined; let widget: any;
   const errors: string[] = []; const notices: string[] = [];
   await session.bindExtensions({ mode: "tui", shutdownHandler: () => { shutdowns++; }, onError: e => errors.push(e.error),
-    uiContext: { setWidget() {}, setStatus() {}, getEditorText: () => editor, notify: (message: string) => notices.push(message), onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
+    uiContext: { setWidget: (_key: string, factory: any) => { widget = factory; }, setStatus() {}, getEditorText: () => editor, notify: (message: string) => notices.push(message), onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
   return { session, faux, board: boardPath(cwd), errors, notices, draft: (text: string) => { editor = text; }, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
+    waiting: () => widget ? widget(undefined, { fg: (_c: string, text: string) => text }).render(200)[0] : "",
     close: async () => { await session.extensionRunner!.emit({ type: "session_shutdown", reason: "reload" }); session.dispose(); } };
 }
 const count = () => (globalThis as any)[PENDING_COUNT_KEY]?.() ?? 0;
@@ -120,7 +121,8 @@ test("user cancellation: busy result survives Escape once and remains pending un
   try {
     r.faux.setResponses([async (_c, options) => { await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true })); return fauxAssistantMessage("interrupted"); }, fauxAssistantMessage("continued")]);
     const busy = r.session.prompt("busy"); await sleep(20); state(); await sleep(1200);
-    assert.equal(count(), 1); r.type("\x1b"); r.session.clearQueue(); await r.session.abort(); await busy;
+    assert.equal(count(), 1); assert.equal(r.waiting(), ""); // finished: no longer shown as waiting, though not yet read
+    r.type("\x1b"); r.session.clearQueue(); await r.session.abort(); await busy;
     assert.equal(r.shutdowns(), 0); assert.equal(results(spawner).length, 1); assert.equal(count(), 1);
     await r.session.prompt("continue"); await sleep(20); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1); assert.equal(results(spawner).length, 1);
   } finally { await r.close(); }

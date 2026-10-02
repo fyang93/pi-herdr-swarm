@@ -119,7 +119,8 @@ export function lifecycle(pi: ExtensionAPI) {
 
   function widget() {
     if (ctx?.mode !== "tui") return;
-    const waiting = [...pendingRuns(ctx.sessionManager, true)];
+    // Only peers still running: a finished peer's result is read (and queued while a turn runs), even if not yet answered.
+    const waiting = [...pending()].filter(([id]) => !written.has(id));
     const statuses = new Map(waiting.filter(([id]) => blocked.has(id)).map(([, run]) => [run.name, "blocked"]));
     ctx.ui.setWidget("swarm", waiting.length ? (_tui, theme) => waitingView(waiting.map(([, run]) => run.name), statuses, theme) : undefined);
   }
