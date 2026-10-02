@@ -136,6 +136,10 @@ test("'*' broadcasts within the project; exact names cross projects", async () =
   assert.equal(broadcast.deliveries.find(d => d.to === "blocked")?.status, "rejected");
   reset({ agents: [{ name: "other", pane_id: "w1:p4", cwd: "/other-project" }] });
   assert.equal((await deliver({ from: "spawner", to: "other", message: "cross-project" })).deliveries[0].status, "submitted");
+  const prompts = calls().filter(c => c[1] === "prompt").length;
+  const self = await deliver({ from: "spawner", to: "spawner", message: "note to self" });
+  assert.deepEqual([self.deliveries[0].status, self.deliveries[0].code], ["rejected", "self"]);
+  assert.equal(calls().filter(c => c[1] === "prompt").length, prompts, "never typed into the sender's own session");
 });
 
 test("canonical Git roots separate nested repositories, worktrees, submodules and non-Git directories", async () => {

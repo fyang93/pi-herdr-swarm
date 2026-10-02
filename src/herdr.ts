@@ -144,6 +144,8 @@ export async function deliver(input: { from: string; to: string; message: string
   }
   const text = `[swarm message] ${validateName(input.from)} → ${input.to}\n${message}`;
   deliveries.push(...await Promise.all(targets.map(async (to): Promise<Delivery> => {
+    // It would land as a new user message in the sender's own session; keep notes in context, or post to the board.
+    if (to === input.from) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
     try {
       await prompt(to, text);
       return { to, ...deliveryOutcome() };
