@@ -272,6 +272,16 @@ test("spawn inherits model but no tool restrictions; detach retains history with
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
+test("auto names skip senders still on the retained board", async () => {
+  reset(); const h = await harness();
+  try {
+    postSync(boardPath(dir), { from: "peer-1", to: "*", message: "a peer-1 from another session" });
+    await h.tool("swarm_spawn", { task: "AUTO", detach: true });
+    const start = calls().filter(c => c[1] === "start").at(-1)!;
+    assert.equal(start[start.indexOf("--swarm-name") + 1], "peer-2");
+  } finally { await h.event("session_shutdown", { reason: "reload" }); }
+});
+
 test("board reads are descriptor-bounded; synchronous publication never scans or reclaims; I/O errors are not empty", async () => {
   const board = join(dir, "bounded-board");
   const note = postSync(board, { from: "a", to: "b", message: "old" });

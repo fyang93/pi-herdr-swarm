@@ -80,9 +80,8 @@ function parseNote(text: string): Note | undefined {
     return note.expires > note.created ? note : undefined;
   } catch { return undefined; }
 }
-export async function readBoard(path: string, filter: { from?: string; to?: string; limit?: number } = {}, report: (warning: string) => void = console.warn): Promise<Note[]> {
-  const limit = filter.limit ?? 20;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be 1..100.");
+/** Every unexpired note, newest first; reclaims expired files on the way. */
+async function scanBoard(path: string, report: (warning: string) => void): Promise<Note[]> {
   let files: string[];
   try { files = (await readdir(path)).filter(f => f.endsWith(".md")).sort().reverse(); }
   catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
@@ -95,14 +94,20 @@ export async function readBoard(path: string, filter: { from?: string; to?: stri
     catch (error: any) { if (error.code === "ENOENT") continue; throw error; }
     const note = text === undefined ? undefined : parseNote(text);
     if (!note) continue;
-    if (note.expires <= Date.now()) {
-      try { await unlink(file); } catch (error: any) { if (error.code !== "ENOENT") throw error; }
-      continue;
-    }
-    const matches = (filter.from === undefined || note.from === filter.from) && (filter.to === undefined || note.to === filter.to);
-    if (matches && notes.length < limit) notes.push(note);
+    if (note.expires > Date.now()) notes.push(note);
+    else try { await unlink(file); } catch (error: any) { if (error.code !== "ENOENT") throw error; }
   }
   return notes;
+}
+export async function readBoard(path: string, filter: { from?: string; to?: string; limit?: number } = {}, report: (warning: string) => void = console.warn): Promise<Note[]> {
+  const limit = filter.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be 1..100.");
+  const matches = (note: Note) => (filter.from === undefined || note.from === filter.from) && (filter.to === undefined || note.to === filter.to);
+  return (await scanBoard(path, report)).filter(matches).slice(0, limit);
+}
+/** Names that still sign retained notes: reusing one would make two agents indistinguishable on the board. */
+export async function boardSenders(path: string): Promise<Set<string>> {
+  return new Set((await scanBoard(path, () => {})).map(note => note.from));
 }
 export function formatNote(note: Note): string {
   validate(note);

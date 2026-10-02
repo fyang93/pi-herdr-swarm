@@ -3,7 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
-import { boardPath, MESSAGE_LIMIT, formatNote, readBoard } from "./board.ts";
+import { boardPath, boardSenders, MESSAGE_LIMIT, formatNote, readBoard } from "./board.ts";
 import { availableName, sessionBinding, identity, list, projectRoot, requireHerdr, send, start, validateName } from "./herdr.ts";
 import { loadout, presets, snapshot } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
@@ -60,7 +60,8 @@ export default function swarm(pi: ExtensionAPI) {
   async function prepareSpawn(params: { agent?: string; name?: string; model?: string; cwd?: string }, history: History, known: string, context: ExtensionContext) {
     const preset = params.agent === undefined ? undefined : presets(context.cwd, context.isProjectTrusted()).find(p => p.name === params.agent);
     if (params.agent !== undefined && !preset) throw new Error(`Unknown preset ${params.agent}. Use swarm_list.`);
-    const peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), history.keys()));
+    const taken = [...history.keys(), ...await boardSenders(path())];
+    const peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), taken));
     if (history.has(peer)) throw new Error(`${peer} was already spawned; use resume explicitly. ${known}`);
     const config = await snapshot(preset, context, pi.getThinkingLevel(), params);
     const runsDir = join(context.sessionManager.getSessionDir(), "swarm-runs");
@@ -71,7 +72,7 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer with optional configuration preset; role belongs in task. Inherit model/thinking, not history or tool restrictions. Auto names avoid online and historical names. resume restores your ended peer's session and saved configuration; only task/detach may accompany resume. All spawned peers auto-exit unless interrupted; default waits and reads the final reply from their session. detach skips waiting and leaves only a board result. Send never resumes peers.",
+    description: "Start a fresh pi peer with optional configuration preset; role belongs in task. Inherit model/thinking, not history or tool restrictions. Auto names avoid online names, your historical names and names on the retained board. resume restores your ended peer's session and saved configuration; only task/detach may accompany resume. All spawned peers auto-exit unless interrupted; default waits and reads the final reply from their session. detach skips waiting and leaves only a board result. Send never resumes peers.",
     parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1 })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })), detach: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
