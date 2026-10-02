@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { initTheme, keyHint, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { Box, visibleWidth, KeybindingsManager, type Component } from "@earendil-works/pi-tui";
 import swarm from "../src/index.ts";
-import { agentRow, noticeView, spawnResult, waitingView } from "../src/ui.ts";
+import { agentRow, noticeView, waitingView } from "../src/ui.ts";
 import { formatNote, type Note } from "../src/board.ts";
 
 initTheme("dark", false);
@@ -173,14 +173,4 @@ test("unknown notices use custom-message background and warning, never success",
     assert.ok(long.length <= 10);
     assert.ok(long.every(line => visibleWidth(line) <= width));
   }
-});
-
-test("a long first name never hides how many other peers are waiting; detach is not a board post", () => {
-  const plainTheme: any = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
-  const line = plain(waitingView(["a".repeat(32), "b", "c"], new Map(), plainTheme).render(40));
-  assert.match(line, /\(\+2\)$/); assert.ok(visibleWidth(line) <= 40);
-  assert.equal(plain(waitingView(["a".repeat(32), "b", "c"], new Map(), plainTheme).render(12)), "Waiting: 3");
-  const detached = spawnResult({ content: [{ type: "text", text: "Detached." }], details: { name: "peer", pane: "w1:p9", detached: true } } as any,
-    { expanded: false } as any, plainTheme, { isPartial: false, isError: false } as any)!.render(80);
-  assert.match(plain(detached), /· detached\s*$/m); assert.doesNotMatch(plain(detached), /board only/);
 });

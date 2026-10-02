@@ -47,7 +47,10 @@ export function waitingView(names: string[], statuses: Map<string, string>, them
       // The count of hidden peers stays visible: truncate the names, not the "(+N)".
       const more = names.length > shown.length ? ` (+${names.length - shown.length})` : "";
       const room = width - visibleWidth(more);
-      if (room < visibleWidth("Waiting: x")) return [truncateToWidth(`Waiting: ${names.length}`, width)];
+      if (room < visibleWidth("Waiting: xx...")) {
+        const total = `Waiting: ${names.length}`;
+        return [truncateToWidth(visibleWidth(total) <= width ? total : String(names.length), width)];
+      }
       return [truncateToWidth(`Waiting: ${shown.join(", ")}`, room) + more];
     },
   };

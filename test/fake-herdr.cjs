@@ -15,6 +15,8 @@ const ok = result => console.log(JSON.stringify({ result }));
 const save = () => writeFileSync(join(dir, 'state.json'), JSON.stringify(state));
 const fail = (code, message) => { console.error(JSON.stringify({ error: { code, message } })); process.exit(1); };
 if (key === 'agent list') {
+  if (state.listMarker) writeFileSync(state.listMarker, 'started');
+  if (state.delayList) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.delayList);
   if (state.listError) fail(state.listError === true ? 'server_error' : state.listError, 'server unavailable');
   ok({ agents: state.agents || [] });
 } else if (key === 'agent get') {

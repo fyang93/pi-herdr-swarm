@@ -140,6 +140,7 @@ export function lifecycle(pi: ExtensionAPI) {
       if (!context.isIdle() || context.hasPendingMessages() || context.ui.getEditorText() || pendingCount()) return;
       candidate = false;
       const boundary = flag("boundary");
+      if (typeof boundary === "string" && boundary && !context.sessionManager.getBranch().some(entry => entry.id === boundary)) return;
       const reply = lastReply(context.sessionManager, typeof boundary === "string" && boundary ? boundary : null);
       if (outcome === "aborted" || wasAborted(reply)) return;
       finished = true; // the result is the session's last reply; the spawner reads it after this exit
@@ -180,7 +181,7 @@ export function lifecycle(pi: ExtensionAPI) {
       status(unknown);
       widget();
       scheduleExit();
-    } catch (error) { if (active && ctx === current) status(`herdr list: ${String(error)}`); }
+    } catch (error) { if (active && ctx === current) status(pending().size ? `herdr list: ${String(error)}` : undefined); }
     finally { polling = false; }
   }
 
@@ -218,6 +219,7 @@ export function lifecycle(pi: ExtensionAPI) {
   });
   // /tree can leave the branch that holds the spawns: redraw from the new branch at once.
   pi.on("session_tree", () => {
+    cancelExit();
     status(undefined);
     widget();
     if (pending().size) void poll();
