@@ -50,7 +50,7 @@ const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?
 
 ## The board
 
-The board holds only what agents choose to post: findings others should see, decisions, claims. Private messages and results never land there. It is `<git root>/.pi/swarm/board/`, one Markdown file per notice, readable with `cat` and `grep`. Notices are at most 4000 characters (put longer work in a file and post its path) and are kept for 24 hours. Every agent sees notices in the same order.
+The board holds only what agents choose to post: findings others should see, decisions, what each is working on. Private messages and results never land there. It is `<git root>/.pi/swarm/board/`, one Markdown file per notice, readable with `cat` and `grep`. Notices are at most 4000 characters (put longer work in a file and post its path) and are kept for 24 hours.
 
 Two compositions:
 
