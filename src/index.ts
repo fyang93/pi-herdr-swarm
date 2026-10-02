@@ -88,7 +88,7 @@ export default function swarm(pi: ExtensionAPI) {
       if (params.resume === undefined) {
         const delivery = params.detach ? "is posted to the board" : `is delivered to ${spawner} as your result`;
         settings.task = `You are ${peer}, spawned by ${spawner}.\n\n${settings.task}\n\n` +
-          `When you finish, simply stop: your final message ${delivery}, and your session ends automatically.`;
+          `When you finish, simply stop: your final message ${delivery}.`;
       }
       settings.args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
       if (boundary) settings.args.push("--swarm-boundary", boundary);
