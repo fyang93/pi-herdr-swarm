@@ -168,6 +168,8 @@ export interface Launch {
   session?: string;
   resume?: boolean;
   maxAgents?: number;
+  /** Names of the caller's other peers: their panes can be split too once the caller's own is full. */
+  near?: string[];
   /** Called with the new pane before the agent starts, so the spawn record exists even if start blocks. */
   beforeStart?: (pane: string) => void;
 }
@@ -186,12 +188,18 @@ export function start(launch: Launch): Promise<{ name: string; pane: string }> {
     const roots = new Map<string, string>();
     for (const agent of agents) if (await inProject(agent, target, roots)) count++;
     if (count >= max) throw new Error(`Agent admission refused: ${count}/${max} online in ${target}.`);
+    // Split the largest pane, yours or a peer's, that leaves both halves usable; a background tab otherwise.
     const callerPane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
-    const { layout } = await herdr(["pane", "layout", "--pane", callerPane]);
-    const own = !layout.zoomed && layout.panes.find((p: any) => p.pane_id === callerPane);
-    const direction = own && splitDirection(own.rect.width, own.rect.height);
-    const pane: string = direction
-      ? (await herdr(["pane", "split", callerPane, "--direction", direction, "--no-focus", "--cwd", launch.cwd])).pane.pane_id
+    const near = new Set(launch.near ?? []);
+    let best: { pane: string; direction: "right" | "down"; area: number } | undefined;
+    for (const candidate of [callerPane, ...agents.filter(a => a.name && near.has(a.name) && a.pane_id).map(a => a.pane_id!)]) {
+      const { layout } = await herdr(["pane", "layout", "--pane", candidate]);
+      const rect = !layout.zoomed && layout.panes.find((p: any) => p.pane_id === candidate)?.rect;
+      const direction = rect && splitDirection(rect.width, rect.height);
+      if (direction && (!best || rect.width * rect.height > best.area)) best = { pane: candidate, direction, area: rect.width * rect.height };
+    }
+    const pane: string = best
+      ? (await herdr(["pane", "split", best.pane, "--direction", best.direction, "--no-focus", "--cwd", launch.cwd])).pane.pane_id
       : (await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID!, "--no-focus", "--label", launch.name, "--cwd", launch.cwd])).root_pane.pane_id;
     try {
       launch.beforeStart?.(pane);

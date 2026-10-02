@@ -177,5 +177,6 @@ test("--swarm-agent starts a session as a preset: its model, thinking and role",
     await r.session.prompt("hello");
     assert.equal(r.session.model?.id, "test-model"); assert.equal(r.session.thinkingLevel, "off"); // clamped: the faux model does not reason
     assert.match(prompt, /You alone write the account\./); assert.deepEqual(r.errors, []);
+    await sleep(200); // let session_start work (integration check) settle before the session closes
   } finally { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; await r.close(); }
 });

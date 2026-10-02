@@ -36,7 +36,7 @@ swarm_board({ from: "*review*", limit: 10 });
 
 ## How a run works
 
-1. **Spawn.** A new pane opens next to yours (or in a background tab) and pi starts there with the task. You keep working; a line shows `Waiting: review-1`.
+1. **Spawn.** A new pane opens by splitting the roomiest of your pane and your peers' panes, so peers tile together (a background tab only when none can be split into two usable halves) and pi starts there with the task. You keep working; a line shows `Waiting: review-1`.
 2. **Work.** The peer can message, post notices or spawn helpers of its own.
 3. **End.** When it finishes it exits and closes its pane. Escape or typing in its pane keeps it open.
 4. **Result.** You see that its session has ended, read its final reply from the session file, and get it as a `swarm_result` plus a short wake-up notice. Errors, interruptions and empty replies are reported as such.

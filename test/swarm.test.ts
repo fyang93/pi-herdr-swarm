@@ -198,6 +198,12 @@ test("split respects caller geometry/divider; uncertain launch is not repeated o
   assert.deepEqual(calls().find(c => c[1] === "split")?.slice(0, 6), ["pane", "split", "w1:p1", "--direction", "right", "--no-focus"]);
   reset({ layout: { zoomed: true, panes: [] } }); assert.equal((await start(launch)).pane, "w1:p8");
   assert.deepEqual(calls().find(c => c[1] === "create")?.slice(0, 6), ["tab", "create", "--workspace", "w1", "--no-focus", "--label"]);
+  const full = { zoomed: false, panes: [{ pane_id: "w1:p1", rect: { width: 92, height: 24 } }] };
+  reset({ agents: [{ name: "old-peer", pane_id: "w1:p5", agent: "pi", cwd: dir }], layouts: { "w1:p1": full, "w1:p5": { zoomed: false, panes: [{ pane_id: "w1:p5", rect: { width: 184, height: 49 } }] } } });
+  await start({ ...launch, near: ["old-peer"] }); // own pane full: the peer's roomy tab is split instead of opening another
+  assert.deepEqual(calls().find(c => c[1] === "split")?.slice(0, 5), ["pane", "split", "w1:p5", "--direction", "right"]);
+  reset({ layouts: { "w1:p1": full } }); await start({ ...launch, near: ["gone-peer"] });
+  assert.ok(calls().some(c => c[1] === "create") && !calls().some(c => c[1] === "split"));
   reset({ startError: "agent_start_failed" }); await assert.rejects(start(launch), /Startup diagnostics/);
   assert.equal(calls().filter(c => c[1] === "start").length, 1); assert.equal(calls().at(-1)?.[1], "close");
   reset({ promptError: "timeout" }); await assert.rejects(start(launch), /do not blindly retry/);

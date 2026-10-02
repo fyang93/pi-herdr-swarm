@@ -40,14 +40,16 @@ export default function swarm(pi: ExtensionAPI) {
     project = await projectRoot(context.cwd);
     const agent = pi.getFlag("swarm-agent");
     if (typeof agent !== "string" || !agent) return;
-    const preset = presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent);
-    if (!preset) return context.ui.notify(`swarm: no preset named ${agent}`, "error");
-    const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
-    const [provider, ...id] = config.model.split("/");
-    const model = context.modelRegistry.find(provider, id.join("/"));
-    if (!model || !await pi.setModel(model)) return context.ui.notify(`swarm: model ${config.model} unavailable`, "error");
-    pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
-    role = config.prompt;
+    try {
+      const preset = presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent);
+      if (!preset) throw new Error(`no preset named ${agent}`);
+      const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
+      const [provider, ...id] = config.model.split("/");
+      const model = context.modelRegistry.find(provider, id.join("/"));
+      if (!model || !await pi.setModel(model)) throw new Error(`model ${config.model} unavailable`);
+      pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
+      role = config.prompt;
+    } catch (error) { try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
   });
   pi.on("before_agent_start", event => role ? { systemPrompt: `${event.systemPrompt}\n\n${role}` } : undefined);
   const runState = lifecycle(pi);
@@ -109,7 +111,7 @@ export default function swarm(pi: ExtensionAPI) {
       let launched;
       try {
         launched = await start({
-          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(),
+          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), near: [...history.keys()],
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
         });
       } finally { if (entry) runState.launched(entry); }

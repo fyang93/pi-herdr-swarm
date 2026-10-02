@@ -33,7 +33,7 @@ if (key === 'agent list') {
   if (error) fail(error, 'rename failed');
   ok({ agent: own });
 } else if (key === 'pane current') ok({ pane: { pane_id: 'w1:p1' } });
-else if (key === 'pane layout') ok({ layout: state.layout });
+else if (key === 'pane layout') ok({ layout: state.layouts?.[args[args.indexOf('--pane') + 1]] ?? state.layout });
 else if (key === 'pane split') { state.lastCwd = args[args.indexOf('--cwd') + 1]; save(); ok({ pane: { pane_id: 'w1:p9' } }); }
 else if (key === 'tab create') { state.lastCwd = args[args.indexOf('--cwd') + 1]; save(); ok({ root_pane: { pane_id: 'w1:p8' } }); }
 else if (key === 'agent start') {
