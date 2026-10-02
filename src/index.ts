@@ -86,7 +86,7 @@ export default function swarm(pi: ExtensionAPI) {
         : await prepareSpawn(params, history, known, context);
       const settings = loadout(config, session, params.task);
       if (params.resume === undefined) {
-        const delivery = params.detach ? "is posted to the board" : `is delivered to ${spawner} as your result`;
+        const delivery = params.detach ? "is posted to the board, and nobody is waiting for it" : `is delivered to ${spawner} as your result`;
         settings.task = `You are ${peer}, spawned by ${spawner}.\n\n${settings.task}\n\n` +
           `When you finish, simply stop: your final message ${delivery}.`;
       }

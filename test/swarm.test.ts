@@ -260,7 +260,7 @@ test("spawn inherits model but no tool restrictions; detach retains history with
     assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
     assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "You are first, spawned by spawner.\n\nROLE_IN_TASK\n\nWhen you finish, simply stop: your final message is delivered to spawner as your result.");
-    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /is posted to the board/);
+    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /is posted to the board, and nobody is waiting for it\./);
     assert.equal(args[args.indexOf("--swarm-name") + 1], "first");
     assert.equal(h.entries.filter(e => e.customType === "swarm_spawn").length, 2);
     await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use resume explicitly/);
