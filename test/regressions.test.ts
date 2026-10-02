@@ -41,7 +41,7 @@ function spawnerSession() { const cwd = mkdtempSync(join(dir, "spawner-")); cons
 function peerRun(name: string, spawner: SessionManager): Run {
   const m = SessionManager.create(spawner.getCwd(), mkdtempSync(join(dir, "peer-")));
   m.appendMessage({ role: "user", content: "task", timestamp: Date.now() }); m.appendMessage(fauxAssistantMessage(`${name} final`));
-  const run: Run = { name, session: m.getSessionFile()!, pane: "w1:p9", boundary: null, detach: false, snapshot: { cwd: spawner.getCwd(), model: "swarm-test/test-model", thinking: "off", skills: [] } };
+  const run: Run = { name, session: m.getSessionFile()!, pane: "w1:p9", boundary: null, detach: false, snapshot: { cwd: spawner.getCwd(), model: "swarm-test/test-model", thinking: "off" } };
   spawner.appendCustomEntry("swarm_spawn", run); return run;
 }
 const live = (run: Run, status = "working", name: string | undefined = run.name) => ({ name, pane_id: "w1:p19", agent: "pi", agent_status: status, agent_session: { kind: "path", value: run.session } });

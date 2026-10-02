@@ -49,14 +49,13 @@ const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?
 
 ## Presets
 
-Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `model`, `thinking`, `cwd`, `skills`, and a system prompt body (`system-prompt: append | replace`). Presets configure; they never restrict tools or extensions. Without a preset, a peer inherits your current model and thinking.
+Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, and a body that is appended to the peer's system prompt (its role and rules). Presets configure; they never restrict tools, extensions or skills, which pi loads as usual. Without a preset, a peer inherits your current model and thinking.
 
 ```markdown
 ---
 name: reviewer
 description: Careful code review
 thinking: high
-system-prompt: append
 ---
 Report actionable findings with file paths.
 ```

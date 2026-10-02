@@ -210,7 +210,7 @@ test("optional presets snapshot only configuration, respect trust and override o
   mkdirSync(join(global, "agents"), { recursive: true }); mkdirSync(project, { recursive: true });
   process.env.PI_CODING_AGENT_DIR = global;
   writeFileSync(join(global, "agents/reviewer.md"), "---\nname: reviewer\ndescription: global\n---\nGlobal body");
-  writeFileSync(join(project, "reviewer.md"), "---\nname: reviewer\ndescription: project\nmodel: anthropic/claude-sonnet-4-5\nthinking: low\nsystem-prompt: append\n---\nProject body");
+  writeFileSync(join(project, "reviewer.md"), "---\nname: reviewer\ndescription: project\nmodel: anthropic/claude-sonnet-4-5\nthinking: low\n---\nProject body");
   assert.equal(presets(dir, false).find(p => p.name === "reviewer")?.description, "global");
   const preset = presets(dir, true).find(p => p.name === "reviewer")!;
   const context: any = { cwd: dir, model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1"), getModel("anthropic", "claude-sonnet-4-5")] } };
@@ -222,6 +222,7 @@ test("optional presets snapshot only configuration, respect trust and override o
   const settings = loadout(selected, join(dir, "session.jsonl"), "task");
   assert.equal(settings.args.includes("--tools"), false); assert.equal(settings.args.includes("--no-tools"), false);
   assert.equal(readFileSync(join(dir, "system.md"), "utf8"), "Project body");
+  assert.deepEqual(settings.args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
   for (const fields of [{ "session-mode": "fork" }, { cli: "claude" }]) await assert.rejects(snapshot({ ...preset, fields }, context, "high", {}));
   delete process.env.PI_CODING_AGENT_DIR;
 });

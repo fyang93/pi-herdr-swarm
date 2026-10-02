@@ -40,7 +40,7 @@ export default function swarm(pi: ExtensionAPI) {
     if ([params.agent, params.model, params.cwd, params.name].some(v => v !== undefined)) throw new Error("resume accepts only task and optional detach.");
     const previous = history.get(params.resume!);
     const saved = previous?.snapshot;
-    if (!previous?.session || !saved?.model || !saved.thinking || !saved.cwd || !Array.isArray(saved.skills)) {
+    if (!previous?.session || !saved?.model || !saved.thinking || !saved.cwd) {
       throw new Error(`Cannot resume ${params.resume}: snapshot/session/cwd missing. ${known}`);
     }
     const peer = validateName(params.resume!);
