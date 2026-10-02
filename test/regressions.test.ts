@@ -31,7 +31,7 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
   let shutdowns = 0; let editor = ""; let terminalInput: ((data: string) => unknown) | undefined;
   const errors: string[] = []; const notices: string[] = [];
   await session.bindExtensions({ mode: "tui", shutdownHandler: () => { shutdowns++; }, onError: e => errors.push(e.error),
-    uiContext: { setWidget() {}, getEditorText: () => editor, notify: (message: string) => notices.push(message), onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
+    uiContext: { setWidget() {}, setStatus() {}, getEditorText: () => editor, notify: (message: string) => notices.push(message), onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
   return { session, faux, board: boardPath(cwd), errors, notices, draft: (text: string) => { editor = text; }, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
     close: async () => { await session.extensionRunner!.emit({ type: "session_shutdown", reason: "reload" }); session.dispose(); } };
 }
@@ -165,4 +165,7 @@ test("read-only session boundaries never reuse old, abandoned, empty or corrupt 
   spawner.appendCustomMessageEntry("swarm_result", "actual", true, { name: run.name, session: run.session, spawnEntryId: id }); assert.equal(pendingRuns(spawner).size, 0); assert.equal(pendingRuns(spawner, true).size, 1);
   spawner.appendMessage(fauxAssistantMessage("interrupted", { stopReason: "aborted" })); assert.equal(pendingRuns(spawner, true).size, 1);
   spawner.appendMessage(fauxAssistantMessage("processed")); assert.equal(pendingRuns(spawner, true).size, 0);
+  // Navigating to a branch that holds the spawn but not its result must not wait forever.
+  spawner.branch(id); spawner.appendMessage({ role: "user", content: "another path", timestamp: Date.now() });
+  assert.equal(pendingRuns(spawner).size, 0); assert.equal(pendingRuns(spawner, true).size, 0);
 });

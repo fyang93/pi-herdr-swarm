@@ -56,10 +56,13 @@ const resultId = (entry: any): string | undefined =>
   entry.type === "custom_message" && entry.customType === "swarm_result" ? entry.details?.spawnEntryId : undefined;
 
 /**
- * Non-detached runs on the active branch without an archived result. With `processed`, a run also stays
- * pending until a completed assistant reply follows its result: the host must not exit before reading it.
+ * Non-detached runs on the active branch whose result is not archived anywhere in the session (a result is
+ * archived once, whichever branch the user is on). With `processed`, a run whose result is on the active
+ * branch also stays pending until a completed assistant reply follows it: the host must not exit before
+ * reading it. A result left on another branch counts as handled: the user navigated away from it.
  */
-export function pendingRuns(manager: Pick<SessionManager, "getBranch">, processed = false): Map<string, Run> {
+export function pendingRuns(manager: Pick<SessionManager, "getBranch" | "getEntries">, processed = false): Map<string, Run> {
+  const archived = new Set(manager.getEntries().map(resultId).filter(Boolean));
   const runs = new Map<string, Run>();
   const archivedAt = new Map<string, number>();
   let lastCompleted = -1;
@@ -69,7 +72,11 @@ export function pendingRuns(manager: Pick<SessionManager, "getBranch">, processe
     if (id && runs.has(id)) archivedAt.set(id, index);
     if (entry.type === "message" && entry.message.role === "assistant" && ["stop", "length"].includes(entry.message.stopReason)) lastCompleted = index;
   });
-  for (const [id, index] of archivedAt) if (!processed || lastCompleted > index) runs.delete(id);
+  for (const id of runs.keys()) {
+    if (!archived.has(id)) continue;
+    const index = archivedAt.get(id);
+    if (!processed || index === undefined || lastCompleted > index) runs.delete(id);
+  }
   return runs;
 }
 
@@ -98,22 +105,17 @@ export function lifecycle(pi: ExtensionAPI, board: () => string) {
   const pendingCount = () => ctx ? pendingRuns(ctx.sessionManager, true).size : 0;
   const notice = (content: string) => pi.sendMessage({ customType: "swarm_notice", content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
 
-  /** A result is archived once per run, even if the user later navigates to a branch without it. */
-  function archivedAnywhere(): Set<string> {
-    const ids = new Set(written);
-    for (const entry of ctx!.sessionManager.getEntries()) {
-      const id = resultId(entry);
-      if (id) ids.add(id);
-    }
-    return ids;
-  }
-
   /** Launched by swarm with these flags, and still on the session it was launched with. */
   function eligible(context: ExtensionContext): boolean {
     const session = flag("session");
     const file = context.sessionManager.getSessionFile();
     if (typeof flag("name") !== "string" || typeof flag("spawner") !== "string" || typeof session !== "string" || !session || !file) return false;
     return sessionPath(session) === sessionPath(file);
+  }
+
+  /** Supervision trouble is shown once in the status line (not as repeated notices) and cleared on recovery. */
+  function status(problem: string | undefined) {
+    if (ctx?.mode === "tui") ctx.ui.setStatus("swarm", problem ? `swarm: still waiting, state unknown (${problem})` : undefined);
   }
 
   function widget() {
@@ -178,14 +180,15 @@ export function lifecycle(pi: ExtensionAPI, board: () => string) {
       const agents = await list();
       if (!active || ctx !== current) return;
       // Read the session after listing: navigation while list was in flight must not archive an abandoned run.
-      const archived = archivedAnywhere();
+      let unknown: string | undefined;
       for (const [id, run] of pending()) {
-        if (archived.has(id) || launching.has(id)) continue;
-        try { supervise(id, run, agents); } catch { /* binding unknown this tick */ }
+        if (written.has(id) || launching.has(id)) continue;
+        try { supervise(id, run, agents); } catch (error) { unknown = `${run.name}: ${String(error)}`; }
       }
+      status(unknown);
       widget();
       scheduleExit();
-    } catch { /* herdr unreachable: state unknown, keep waiting */ }
+    } catch (error) { if (active && ctx === current) status(`herdr list: ${String(error)}`); }
     finally { polling = false; }
   }
 
@@ -228,6 +231,7 @@ export function lifecycle(pi: ExtensionAPI, board: () => string) {
     stopWatchingKeys = undefined;
     cancelExit();
     ctx?.ui.setWidget("swarm", undefined);
+    status(undefined);
     if ((globalThis as any)[PENDING_COUNT_KEY] === pendingCount) delete (globalThis as any)[PENDING_COUNT_KEY];
     if (finished && event.reason === "quit" && ctx?.mode === "tui") closeOwnPaneOnExit();
   });
@@ -241,7 +245,7 @@ export function lifecycle(pi: ExtensionAPI, board: () => string) {
       }
       return found;
     },
-    archived: (id: string) => archivedAnywhere().has(id),
+    archived: (id: string) => written.has(id) || ctx!.sessionManager.getEntries().some(entry => resultId(entry) === id),
     pending: (session: string) => [...pending().values()].some(run => sessionPath(run.session) === sessionPath(session)),
     /** Persist the spawn record before the child is started; it is not supervised until `launched`. */
     record(run: Run): string {
