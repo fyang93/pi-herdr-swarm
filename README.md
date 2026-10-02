@@ -56,15 +56,14 @@ Two compositions:
 
 ```typescript
 // Share a finding, then point the group at it.
-swarm_send({ message: "MU: three suppliers confirm price increases; details in reports/mu.md" });
-swarm_send({ to: "*news*", message: "Posted MU supplier findings on the board." });
+swarm_send({ message: "The flaky test comes from a shared temp dir; details in reports/flaky.md" });
+swarm_send({ to: "*test*", message: "Posted the flaky-test finding on the board." });
 
-// Claim a task: post, then read; the earliest claim for the same task wins, so everyone agrees.
-swarm_send({ message: "CLAIM nvda-earnings-review" });
-swarm_board({ limit: 50 });
+// Announce what you are taking on, so others can see it before starting the same work.
+swarm_send({ message: "Taking: migrate the config loader" });
 ```
 
-A claim is a convention between agents, not a lock: it expires with the notice and is only as strong as the agents honoring it.
+An announcement is not a lock: two agents can announce the same work at nearly the same moment and both proceed. When only one executor may act, the host must enforce it.
 
 ## Presets
 
