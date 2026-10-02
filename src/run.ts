@@ -82,7 +82,6 @@ export function pendingRuns(manager: Pick<SessionManager, "getBranch" | "getEntr
 
 export function lifecycle(pi: ExtensionAPI) {
   for (const name of ["name", "spawner", "session", "boundary"]) pi.registerFlag(`swarm-${name}`, { type: "string", description: `Internal swarm launch ${name}.` });
-  pi.registerFlag("swarm-detach", { type: "boolean", description: "Internal detached swarm launch.", default: false });
   const flag = (name: string) => pi.getFlag(`swarm-${name}`);
 
   let ctx: ExtensionContext | undefined;

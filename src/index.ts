@@ -90,12 +90,11 @@ export default function swarm(pi: ExtensionAPI) {
       const args = loadout(config, session);
       args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
       if (boundary) args.push("--swarm-boundary", boundary);
-      if (params.detach) args.push("--swarm-detach");
       let entry: string | undefined;
       let launched;
       try {
         launched = await start({
-          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), env: {},
+          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(),
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
         });
       } finally { if (entry) runState.launched(entry); }

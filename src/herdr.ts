@@ -150,7 +150,6 @@ export interface Launch {
   name: string;
   cwd: string;
   args: string[];
-  env: Record<string, string>;
   task: string;
   session?: string;
   resume?: boolean;
@@ -177,10 +176,9 @@ export function start(launch: Launch): Promise<{ name: string; pane: string }> {
     const { layout } = await herdr(["pane", "layout", "--pane", callerPane]);
     const own = !layout.zoomed && layout.panes.find((p: any) => p.pane_id === callerPane);
     const direction = own && splitDirection(own.rect.width, own.rect.height);
-    const env = Object.entries(launch.env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
     const pane: string = direction
-      ? (await herdr(["pane", "split", callerPane, "--direction", direction, "--no-focus", "--cwd", launch.cwd, ...env])).pane.pane_id
-      : (await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID!, "--no-focus", "--label", launch.name, "--cwd", launch.cwd, ...env])).root_pane.pane_id;
+      ? (await herdr(["pane", "split", callerPane, "--direction", direction, "--no-focus", "--cwd", launch.cwd])).pane.pane_id
+      : (await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID!, "--no-focus", "--label", launch.name, "--cwd", launch.cwd])).root_pane.pane_id;
     try {
       launch.beforeStart?.(pane);
       await herdr(["agent", "start", launch.name, "--kind", "pi", "--pane", pane, "--timeout", "60000", "--", ...launch.args], 70_000);

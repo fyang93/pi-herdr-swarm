@@ -189,7 +189,7 @@ test("identity preserves existing names, otherwise uses pane id; no name search 
 test("split respects caller geometry/divider; uncertain launch is not repeated or closed", async () => {
   assert.equal(splitDirection(100, 20), undefined); assert.equal(splitDirection(101, 15), "right");
   assert.equal(splitDirection(50, 31), "down"); assert.equal(splitDirection(50, 30), undefined);
-  const launch = { name: "new-peer", cwd: dir, args: ["--thinking", "low"], env: {}, task: "task\nsecond line" };
+  const launch = { name: "new-peer", cwd: dir, args: ["--thinking", "low"], task: "task\nsecond line" };
   reset(); assert.equal((await start(launch)).pane, "w1:p9");
   assert.deepEqual(calls().find(c => c[1] === "split")?.slice(0, 6), ["pane", "split", "w1:p1", "--direction", "right", "--no-focus"]);
   reset({ layout: { zoomed: true, panes: [] } }); assert.equal((await start(launch)).pane, "w1:p8");
@@ -304,7 +304,7 @@ test("board reads are descriptor-bounded, reclaim expired notices, and do not re
 });
 
 test("startup admission includes unnamed agents and refuses uncertain counts before starting; blocked startup keeps a durable record", async () => {
-  const launch = { name: "limited", cwd: dir, args: [], env: {}, task: "task", maxAgents: 1 };
+  const launch = { name: "limited", cwd: dir, args: [], task: "task", maxAgents: 1 };
   reset({ agents: [{ agent: "pi", pane_id: "w1:p2", cwd: dir }] });
   await assert.rejects(start(launch), /admission refused/); assert.equal(calls().some(c => c[1] === "start" || c[1] === "split"), false);
   reset({ agents: [{ agent: "pi", pane_id: "w1:p2" }] });
