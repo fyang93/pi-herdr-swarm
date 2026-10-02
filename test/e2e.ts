@@ -87,7 +87,7 @@ try {
   assert.equal(record("demo-a").session, a.session); assert.equal(record("demo-a").boundary, boundary);
   await invoke("swarm_spawn", { resume: "demo-a", task: "/e2e-no-reply" }); await finish("demo-a", 3);
   assert.equal((results("demo-a").at(-1) as any).details.status, "empty");
-  assert.match(String((results("demo-a").at(-1) as any).content), /本次执行没有新回复/);
+  assert.match(String((results("demo-a").at(-1) as any).content), /No new reply in this run/);
   console.log("startup/history: detach and consecutive same-session resume passed");
 
   // A manually launched pi on that same session has no internal launch flags.

@@ -237,7 +237,7 @@ test("list/board do not name caller; send names with notification; board is read
     const result = await h.tool("swarm_send", { message: "board only" });
     assert.match(result.content[0].text, /posted · board only/);
     assert.equal(calls().some(c => c[1] === "prompt"), false);
-    assert.ok(h.notices.some(n => typeof n === "string" && n.includes("本会话已命名为 swarm-w1-p1")));
+    assert.ok(h.notices.some(n => typeof n === "string" && n.includes("This session is now named swarm-w1-p1")));
     assert.match((await h.tool("swarm_board", { from: "swarm-w1-p1" })).content[0].text, /board only/);
     for (let i = 0; i < 30; i++) await post(board, { from: `sender-${i}`, to: "*", message: "x".repeat(4000) });
     const bounded = await h.tool("swarm_board"); assert.equal(bounded.details.notes.length, 20); assert.ok(bounded.content[0].text.length <= 30_000);
@@ -259,8 +259,8 @@ test("spawn inherits model but no tool restrictions; detach retains history with
     assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 1);
     assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
-    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "你是 first，由 spawner 派出。你的最后一条回复会作为结果交给 spawner，之后你会自动退出。\n\nROLE_IN_TASK");
-    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /会写进留言板/);
+    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "You are first, spawned by spawner.\n\nROLE_IN_TASK\n\nWhen you finish, simply stop: your final message is delivered to spawner as your result, and your session ends automatically.");
+    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /is posted to the board/);
     assert.equal(args[args.indexOf("--swarm-name") + 1], "first");
     assert.equal(h.entries.filter(e => e.customType === "swarm_spawn").length, 2);
     await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use resume explicitly/);

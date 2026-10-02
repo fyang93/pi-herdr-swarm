@@ -34,7 +34,7 @@ export function wasAborted(message: any): boolean {
 
 export function finalSummary(message: any, session: string): string {
   let text: string;
-  if (!message) text = "本次执行没有新回复";
+  if (!message) text = "No new reply in this run.";
   else if (message.stopReason === "error") text = `Agent error: ${message.errorMessage || "unknown provider error"}`;
   else text = message.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim() || "Assistant replied without text.";
   if (text.length <= MESSAGE_LIMIT) return text;

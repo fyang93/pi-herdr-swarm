@@ -26,7 +26,7 @@ export default function swarm(pi: ExtensionAPI) {
     if (!project) throw new Error("Swarm project unavailable; check the session startup error.");
     return boardPath(project);
   }
-  const name = (context: ExtensionContext) => identity(value => context.ui.notify(`本会话已命名为 ${value}`, "info"));
+  const name = (context: ExtensionContext) => identity(value => context.ui.notify(`This session is now named ${value}`, "info"));
   pi.on("session_start", async (_event, context) => {
     project = undefined;
     roots.clear();
@@ -86,8 +86,9 @@ export default function swarm(pi: ExtensionAPI) {
         : await prepareSpawn(params, history, known, context);
       const settings = loadout(config, session, params.task);
       if (params.resume === undefined) {
-        const delivery = params.detach ? "会写进留言板" : `会作为结果交给 ${spawner}`;
-        settings.task = `你是 ${peer}，由 ${spawner} 派出。你的最后一条回复${delivery}，之后你会自动退出。\n\n${settings.task}`;
+        const delivery = params.detach ? "is posted to the board" : `is delivered to ${spawner} as your result`;
+        settings.task = `You are ${peer}, spawned by ${spawner}.\n\n${settings.task}\n\n` +
+          `When you finish, simply stop: your final message ${delivery}, and your session ends automatically.`;
       }
       settings.args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
       if (boundary) settings.args.push("--swarm-boundary", boundary);
