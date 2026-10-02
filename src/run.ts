@@ -159,7 +159,7 @@ export function lifecycle(pi: ExtensionAPI) {
     const agent = sessionBinding(agents, run.session); // throws while bindings are uncertain: keep waiting
     if (!agent) return archive(id, run);
     if (agent.agent_status !== "blocked") return void blocked.delete(id);
-    if (!blocked.has(id)) notice(`${run.name} is blocked. Inspect herdr pane read ${agent.pane_id}.`);
+    if (!blocked.has(id)) notice(`${run.name} is blocked in pane ${agent.pane_id}.`);
     blocked.add(id);
   }
 

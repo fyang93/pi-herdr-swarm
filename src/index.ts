@@ -14,7 +14,7 @@ function textResult(text: string, details: unknown = undefined, isError = false)
   if (text.length > 30_000) text = `${text.slice(0, 29_900)}\n… truncated; narrow the board filters or limit.`;
   return { content: [{ type: "text" as const, text }], details, isError };
 }
-const messageLimit = { minLength: 1, maxLength: MESSAGE_LIMIT, description: "Up to 4000 characters. Longer bodies go in a file; send a summary and file path." };
+const messageLimit = { minLength: 1, maxLength: MESSAGE_LIMIT, description: "Up to 4000 characters." };
 
 export default function swarm(pi: ExtensionAPI) {
   /** pi settings (global, overridden by project): { "swarm": { "maxAgents": 16 } }. Read at each spawn. */
@@ -75,7 +75,7 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer in a new pane with `task` as its first message (the role goes in the task), and return immediately. Its final reply comes back to you when it ends. With detach, nothing comes back. resume continues one of your ended runs with its context and configuration; only task and detach may accompany it.",
+    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. Its final reply comes back to you when it ends. With detach, nothing comes back. resume continues one of your ended runs with its context and configuration; only task and detach may accompany it.",
     parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1 })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })), detach: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
@@ -98,7 +98,7 @@ export default function swarm(pi: ExtensionAPI) {
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
         });
       } finally { if (entry) runState.launched(entry); }
-      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached: nobody waits; its final reply stays in its session." : "When it ends, its final reply arrives in this session as a swarm_result message and a wake-up notice starts a new turn, so you can end this turn now."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
+      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached." : "When it ends, its final reply arrives in this session as a swarm_result message and a wake-up notice starts a new turn, so you can end this turn now."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
     },
     renderCall(args, theme, context) {
       const title = args.resume ? theme.fg("toolTitle", theme.bold("resume ")) + theme.fg("accent", args.resume) : theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "inherited") + theme.fg("dim", " → ") + theme.fg("accent", args.name || "…");
@@ -108,7 +108,7 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_send", label: "Swarm send",
-    description: "Without to: post a notice on the project board, readable by every agent for 24 hours; nobody is woken. With to: push the message (native herdr steer, text + Enter) to an exact name in any project, or to every named agent in this project matching a pattern with '*' anywhere (not the sender); nothing is stored. Each recipient is submitted/rejected/unknown with an error code; submitted means written to the terminal, not read. Never retries.",
+    description: "Without to: post a notice on the project board, readable by every agent for 24 hours; nobody is woken. With to: push the message to an exact name in any project, or to every named agent in this project matching a pattern with '*' anywhere (not the sender); nothing is stored. Each recipient is reported as submitted (written to its terminal, not necessarily read), rejected or unknown.",
     parameters: Type.Object({ message: Type.String(messageLimit), to: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
@@ -135,7 +135,7 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_list", label: "Swarm list",
-    description: "Read current herdr agents (name, status, pane) and optional presets. Does not name this session. Unlisted/unknown is not proof of success or a crash.",
+    description: "Online agents (name, status, pane) and available presets.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
       requireHerdr();
@@ -149,7 +149,7 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_board", label: "Swarm board",
-    description: "Read the project board: notices agents posted, newest first, kept 24 hours (20 default, 100 max). from is an exact name or a '*' pattern. Reading notifies nobody.",
+    description: "Read the project board: notices agents posted, newest first, kept 24 hours (20 default, 100 max). from is an exact name or a '*' pattern.",
     parameters: Type.Object({ from: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
     async execute(_id, params) {
       const board = path();
