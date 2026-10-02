@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { projectRoot } from "./herdr.ts";
 
 export const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
 const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
@@ -37,7 +38,21 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
   const settings = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return {}; } };
   const hasPackage = (value: any) => (Array.isArray(value.packages) ? value.packages : []).some((pkg: any) => String(typeof pkg === "string" ? pkg : pkg?.source ?? "").replace(/\/$/, "").endsWith("pi-herdr-swarm"));
   const globalSettings = settings(join(agentDir(), "settings.json"));
-  const projectSettings = context.isProjectTrusted?.() ? settings(join(await (await import("./herdr.ts")).projectRoot(cwd), ".pi/settings.json")) : {};
+  const root = await projectRoot(cwd);
+  let projectTrusted = false;
+  try {
+    const trust = settings(join(agentDir(), "trust.json"));
+    let dir = await realpath(root);
+    let decided = false;
+    while (true) {
+      if (typeof trust[dir] === "boolean") { projectTrusted = trust[dir]; decided = true; break; }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    if (!decided && globalSettings.defaultProjectTrust === "always") projectTrusted = true;
+  } catch { /* Unknown trust: load explicitly with -e. */ }
+  const projectSettings = projectTrusted ? settings(join(root, ".pi/settings.json")) : {};
   return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined, extensionLoaded: hasPackage(globalSettings) || hasPackage(projectSettings) };
 }
 /** pi command-line arguments that reproduce a snapshot. */

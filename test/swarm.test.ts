@@ -228,6 +228,13 @@ test("optional presets snapshot only configuration, respect trust and override o
   assert.equal(args.includes("--tools"), false); assert.equal(args.includes("--no-tools"), false);
   assert.ok(args.includes("-e"));
   assert.equal(loadout({ ...selected, extensionLoaded: true }, join(dir, "session.jsonl")).includes("-e"), false);
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi/settings.json"), JSON.stringify({ packages: ["git:github.com/fyang93/pi-herdr-swarm"] }));
+  writeFileSync(join(global, "trust.json"), JSON.stringify({ [dir]: false }));
+  context.isProjectTrusted = () => true; // spawner is trusted; peer cwd is not
+  const untrustedPeer = await snapshot(undefined, context, "high", {});
+  assert.equal(untrustedPeer.extensionLoaded, false);
+  assert.ok(loadout(untrustedPeer, join(dir, "peer.jsonl")).includes("-e"));
   assert.equal(readFileSync(join(dir, "system.md"), "utf8"), "Project body");
   assert.deepEqual(args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
   for (const fields of [{ "session-mode": "fork" }, { cli: "claude" }]) await assert.rejects(snapshot({ ...preset, fields }, context, "high", {}));
