@@ -99,7 +99,7 @@ export default function swarm(pi: ExtensionAPI) {
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
         });
       } finally { if (entry) runState.launched(entry); }
-      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached; board only." : "Waiting for this session binding to end."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
+      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached: its final reply goes to the board only; nothing comes back here." : "When it ends, its final reply arrives in this session as a swarm_result message, followed by a wake-up notice."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
     },
     renderCall(args, theme, context) {
       const title = args.resume ? theme.fg("toolTitle", theme.bold("resume ")) + theme.fg("accent", args.resume) : theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "inherited") + theme.fg("dim", " → ") + theme.fg("accent", args.name || "…");
