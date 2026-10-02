@@ -75,7 +75,7 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer with optional configuration preset; role belongs in task. Inherit model/thinking, not history or tool restrictions. Auto names avoid online names, your historical names and names on the retained board. resume restores your ended peer's session and saved configuration; only task/detach may accompany resume. All spawned peers auto-exit unless interrupted; default waits and reads the final reply from their session. detach: nobody waits and nothing is delivered; the final reply stays in its session. Send never resumes peers.",
+    description: "Start a fresh pi peer in a new pane with `task` as its first message (the role goes in the task), and return immediately. Its final reply comes back to you when it ends. With detach, nothing comes back. resume continues one of your ended runs with its context and configuration; only task and detach may accompany it.",
     parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1 })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })), detach: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
@@ -87,21 +87,15 @@ export default function swarm(pi: ExtensionAPI) {
       const { peer, config, session, boundary } = params.resume !== undefined
         ? await prepareResume(params, history, known)
         : await prepareSpawn(params, history, known, context);
-      const settings = loadout(config, session, params.task);
-      if (params.resume === undefined) {
-        const finish = params.detach
-          ? "When you finish, simply stop. Nobody is waiting for your final message; it stays in your session."
-          : `When you finish, simply stop: your final message is delivered to ${spawner} as your result.`;
-        settings.task = `You are ${peer}, spawned by ${spawner}.\n\n${settings.task}\n\n${finish}`;
-      }
-      settings.args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
-      if (boundary) settings.args.push("--swarm-boundary", boundary);
-      if (params.detach) settings.args.push("--swarm-detach");
+      const args = loadout(config, session);
+      args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
+      if (boundary) args.push("--swarm-boundary", boundary);
+      if (params.detach) args.push("--swarm-detach");
       let entry: string | undefined;
       let launched;
       try {
         launched = await start({
-          name: peer, cwd: config.cwd, args: settings.args, task: settings.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), env: {},
+          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), env: {},
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
         });
       } finally { if (entry) runState.launched(entry); }

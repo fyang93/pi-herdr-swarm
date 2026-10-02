@@ -36,12 +36,13 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
   if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(level)) throw new Error(`Invalid thinking level: ${level}`);
   return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined };
 }
-export function loadout(config: Snapshot, session: string, task: string) {
+/** pi command-line arguments that reproduce a snapshot. */
+export function loadout(config: Snapshot, session: string): string[] {
   const args = ["--session", session, "-e", extensionPath, "--model", config.model, "--thinking", config.thinking];
   if (config.prompt) {
     const path = join(dirname(session), "system.md");
     writeFileSync(path, config.prompt);
     args.push("--append-system-prompt", path);
   }
-  return { args, task };
+  return args;
 }

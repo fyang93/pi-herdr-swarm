@@ -211,13 +211,13 @@ test("optional presets snapshot only configuration, respect trust and override o
   const context: any = { cwd: dir, model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1"), getModel("anthropic", "claude-sonnet-4-5")] } };
   const inherited = await snapshot(undefined, context, "high", {});
   assert.equal(inherited.model, "openai/gpt-4.1"); assert.equal(inherited.thinking, "off");
-  assert.equal(loadout(inherited, join(dir, "session.jsonl"), "TASK_ONLY").task, "TASK_ONLY");
+  assert.equal(loadout(inherited, join(dir, "session.jsonl")).includes("--append-system-prompt"), false, "no preset body, no prompt file");
   const selected = await snapshot(preset, context, "high", { model: "openai/gpt-4.1" });
   assert.equal(selected.model, "openai/gpt-4.1"); assert.equal(selected.thinking, "off");
-  const settings = loadout(selected, join(dir, "session.jsonl"), "task");
-  assert.equal(settings.args.includes("--tools"), false); assert.equal(settings.args.includes("--no-tools"), false);
+  const args = loadout(selected, join(dir, "session.jsonl"));
+  assert.equal(args.includes("--tools"), false); assert.equal(args.includes("--no-tools"), false);
   assert.equal(readFileSync(join(dir, "system.md"), "utf8"), "Project body");
-  assert.deepEqual(settings.args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
+  assert.deepEqual(args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
   for (const fields of [{ "session-mode": "fork" }, { cli: "claude" }]) await assert.rejects(snapshot({ ...preset, fields }, context, "high", {}));
   delete process.env.PI_CODING_AGENT_DIR;
 });
@@ -254,8 +254,8 @@ test("spawn inherits model but no tool restrictions; detach retains history with
     assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 1);
     assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
-    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "You are first, spawned by spawner.\n\nROLE_IN_TASK\n\nWhen you finish, simply stop: your final message is delivered to spawner as your result.");
-    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /Nobody is waiting for your final message; it stays in your session\./);
+    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "ROLE_IN_TASK", "the task is sent verbatim");
+    assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "TASK");
     assert.equal(args[args.indexOf("--swarm-name") + 1], "first");
     assert.equal(h.entries.filter(e => e.customType === "swarm_spawn").length, 2);
     await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use resume explicitly/);
