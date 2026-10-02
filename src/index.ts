@@ -3,8 +3,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
-import { boardPath, boardSenders, MESSAGE_LIMIT, formatNote, readBoard } from "./board.ts";
-import { availableName, sessionBinding, identity, list, projectRoot, requireHerdr, send, start, validateName } from "./herdr.ts";
+import { boardPath, boardSenders, MESSAGE_LIMIT, formatNote, post, readBoard } from "./board.ts";
+import { availableName, deliver, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
 import { loadout, presets, snapshot } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, boardResult, noticeView, resultMessageView } from "./ui.ts";
@@ -17,9 +17,12 @@ function textResult(text: string, details: unknown = undefined, isError = false)
 const messageLimit = { minLength: 1, maxLength: MESSAGE_LIMIT, description: "Up to 4000 characters. Longer bodies go in a file; send a summary and file path." };
 
 export default function swarm(pi: ExtensionAPI) {
-  const maxValue = process.env.PI_SWARM_MAX_AGENTS ?? "16";
-  const maxAgents = Number(maxValue);
-  if (!/^[1-9]\d*$/.test(maxValue) || !Number.isSafeInteger(maxAgents)) throw new Error("PI_SWARM_MAX_AGENTS must be a positive integer.");
+  /** pi settings (global, overridden by project): { "swarm": { "maxAgents": 16 } }. Read at each spawn. */
+  function maxAgents(): number {
+    const value = (pi.getSettings() as { swarm?: { maxAgents?: unknown } }).swarm?.maxAgents ?? 16;
+    if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error("settings swarm.maxAgents must be a positive integer.");
+    return value as number;
+  }
   let project: string | undefined;
   const roots = new Map<string, string>();
   function path() {
@@ -32,7 +35,7 @@ export default function swarm(pi: ExtensionAPI) {
     roots.clear();
     project = await projectRoot(context.cwd);
   });
-  const runState = lifecycle(pi, path);
+  const runState = lifecycle(pi);
 
   type History = ReturnType<typeof runState.history>;
   /** Restore an ended run of ours: same session and saved configuration; the next reply follows `boundary`. */
@@ -72,7 +75,7 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer with optional configuration preset; role belongs in task. Inherit model/thinking, not history or tool restrictions. Auto names avoid online names, your historical names and names on the retained board. resume restores your ended peer's session and saved configuration; only task/detach may accompany resume. All spawned peers auto-exit unless interrupted; default waits and reads the final reply from their session. detach skips waiting and leaves only a board result. Send never resumes peers.",
+    description: "Start a fresh pi peer with optional configuration preset; role belongs in task. Inherit model/thinking, not history or tool restrictions. Auto names avoid online names, your historical names and names on the retained board. resume restores your ended peer's session and saved configuration; only task/detach may accompany resume. All spawned peers auto-exit unless interrupted; default waits and reads the final reply from their session. detach: nobody waits and nothing is delivered; the final reply stays in its session. Send never resumes peers.",
     parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1 })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })), detach: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
@@ -86,9 +89,10 @@ export default function swarm(pi: ExtensionAPI) {
         : await prepareSpawn(params, history, known, context);
       const settings = loadout(config, session, params.task);
       if (params.resume === undefined) {
-        const delivery = params.detach ? "is posted to the board, and nobody is waiting for it" : `is delivered to ${spawner} as your result`;
-        settings.task = `You are ${peer}, spawned by ${spawner}.\n\n${settings.task}\n\n` +
-          `When you finish, simply stop: your final message ${delivery}.`;
+        const finish = params.detach
+          ? "When you finish, simply stop. Nobody is waiting for your final message; it stays in your session."
+          : `When you finish, simply stop: your final message is delivered to ${spawner} as your result.`;
+        settings.task = `You are ${peer}, spawned by ${spawner}.\n\n${settings.task}\n\n${finish}`;
       }
       settings.args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
       if (boundary) settings.args.push("--swarm-boundary", boundary);
@@ -97,11 +101,11 @@ export default function swarm(pi: ExtensionAPI) {
       let launched;
       try {
         launched = await start({
-          name: peer, cwd: config.cwd, args: settings.args, task: settings.task, session, resume: params.resume !== undefined, maxAgents, env: {},
+          name: peer, cwd: config.cwd, args: settings.args, task: settings.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), env: {},
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
         });
       } finally { if (entry) runState.launched(entry); }
-      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached: its final reply goes to the board only; nothing comes back here." : "When it ends, its final reply arrives in this session as a swarm_result message, followed by a wake-up notice."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
+      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached: nobody waits; its final reply stays in its session." : "When it ends, its final reply arrives in this session as a swarm_result message, followed by a wake-up notice."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
     },
     renderCall(args, theme, context) {
       const title = args.resume ? theme.fg("toolTitle", theme.bold("resume ")) + theme.fg("accent", args.resume) : theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "inherited") + theme.fg("dim", " → ") + theme.fg("accent", args.name || "…");
@@ -111,20 +115,27 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_send", label: "Swarm send",
-    description: "The only message-writing tool. Omit to: board only, no wakeup. Explicit to: persist first, then native herdr steer (text + Enter). Exact names may cross projects best-effort; '*' anywhere matches whole names only in the same canonical Git project, excluding sender/unnamed agents. No other glob syntax. Each recipient is submitted/rejected/unknown, with error code; submitted means terminal bytes written, not processed or read. Never automatically retry or rebroadcast. Shared storage is not confidential.",
+    description: "Without to: post a notice on the project board, readable by every agent for 24 hours; nobody is woken. With to: push the message (native herdr steer, text + Enter) to an exact name in any project, or to every named agent in this project matching a pattern with '*' anywhere (not the sender); nothing is stored. Each recipient is submitted/rejected/unknown with an error code; submitted means written to the terminal, not read. Never retries.",
     parameters: Type.Object({ message: Type.String(messageLimit), to: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
-      const board = path();
-      const result = await send(board, { ...params, from: await name(context) }, { root: project!, roots }, warning => context.ui.notify(warning, "warning"));
+      const from = await name(context);
+      if (params.to === undefined) {
+        const board = path();
+        const note = await post(board, { from, message: params.message }, warning => context.ui.notify(warning, "warning"));
+        return textResult(`posted · board only\nBoard: ${board}\nRetained until ${new Date(note.expires).toISOString()}.`, { board, note, deliveries: [], boardOnly: true });
+      }
+      const result = await deliver({ from, to: params.to, message: params.message }, { root: project!, roots });
       const failed = !!result.discovery || result.deliveries.some(d => d.status !== "submitted");
-      const text = result.boardOnly ? "posted · board only" : `${result.deliveries.length} recipients\n` +
-        result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`).join("\n") +
-        (result.discovery ? `\nRecipient discovery ${result.discovery.status}${result.discovery.code ? ` [${result.discovery.code}]` : ""}: ${result.discovery.error}` : !result.deliveries.length ? "\nNo matching named agents." : "");
-      return textResult(`${text}\nBoard: ${board}\nRetained until ${new Date(result.note.expires).toISOString()}.`, result, failed);
+      const lines = result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`);
+      if (result.discovery) lines.push(`Recipient discovery ${result.discovery.status}${result.discovery.code ? ` [${result.discovery.code}]` : ""}: ${result.discovery.error}`);
+      else if (!result.deliveries.length) lines.push("No matching named agents.");
+      return textResult(`${result.deliveries.length} recipients\n${lines.join("\n")}`, { ...result, boardOnly: false }, failed);
     },
     renderCall(args, theme, context) {
-      const title = args.to === undefined ? theme.fg("toolTitle", theme.bold("posted")) + theme.fg("dim", " · board only") : theme.fg("toolTitle", theme.bold("send")) + theme.fg("dim", " → ") + theme.fg("accent", args.to);
+      const title = args.to === undefined
+        ? theme.fg("toolTitle", theme.bold("post")) + theme.fg("dim", " · board")
+        : theme.fg("toolTitle", theme.bold("send")) + theme.fg("dim", " → ") + theme.fg("accent", args.to);
       return callView(title, args.message || "", context.expanded, theme);
     },
     renderResult: sendResult,
@@ -145,16 +156,16 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_board", label: "Swarm board",
-    description: "Read shared unexpired project messages, newest first (20 default, 100 max; text capped at 30,000 characters). No writes, notifications or naming. Filter from/to exactly; to matches the original target field, not a personal inbox or expanded group members. TTL is retention, not task cancellation or completion. Cross-project sends remain on the source board, not automatically on this one.",
-    parameters: Type.Object({ from: Type.Optional(Type.String()), to: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+    description: "Read the project board: notices agents posted, newest first, kept 24 hours (20 default, 100 max). from is an exact name or a '*' pattern. Reading notifies nobody.",
+    parameters: Type.Object({ from: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
     async execute(_id, params) {
       const board = path();
       const skipped: string[] = [];
       const notes = await readBoard(board, params, warning => { if (skipped.length < 100) skipped.push(warning); });
-      return textResult([notes.map(note => formatNote(note)).join("\n\n") || "No unexpired messages.", ...skipped].join("\n\n"), { notes, skipped });
+      return textResult([notes.map(note => formatNote(note)).join("\n\n") || "No notices.", ...skipped].join("\n\n"), { notes, skipped });
     },
     renderCall(args, theme, context) {
-      return callView(theme.fg("toolTitle", theme.bold("board read")) + theme.fg("dim", ` · from=${args.from || "*"} · to=${args.to || "*"} · limit=${args.limit ?? 20}`), "", context.expanded, theme);
+      return callView(theme.fg("toolTitle", theme.bold("board")) + theme.fg("dim", ` · from=${args.from || "*"} · limit=${args.limit ?? 20}`), "", context.expanded, theme);
     },
     renderResult: boardResult,
   });

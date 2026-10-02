@@ -8,7 +8,7 @@ import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
-import { boardPath, readBoard } from "../src/board.ts";
+import { boardPath } from "../src/board.ts";
 import { readSession, readResult, lastReply, pendingRuns, type Run } from "../src/run.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-runtime-"));
@@ -46,14 +46,13 @@ function peerRun(name: string, spawner: SessionManager): Run {
 }
 const live = (run: Run, status = "working", name: string | undefined = run.name) => ({ name, pane_id: "w1:p19", agent: "pi", agent_status: status, agent_session: { kind: "path", value: run.session } });
 
-test("result and exit: native settled completion archives once before shutdown; manual, error and interrupted outcomes", async () => {
+test("exit: settled completion shuts down without touching the board; manual, error and interrupted outcomes", async () => {
   for (const [auto, reply, expected] of [[false, fauxAssistantMessage("manual"), 0], [true, fauxAssistantMessage("final reply"), 1], [true, fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider unavailable" }), 1], [true, fauxAssistantMessage("stopped", { stopReason: "aborted" }), 0]] as const) {
     state(); const r = await runtime(auto);
     try {
       assert.equal(r.session.thinkingLevel, "off"); assert.ok(r.session.getActiveToolNames().includes("swarm_spawn"));
       r.faux.setResponses([reply]); await r.session.prompt("task"); await sleep(20); assert.equal(r.shutdowns(), expected);
-      if (expected) { assert.equal((await readBoard(r.board)).length, 1); assert.equal((await readBoard(r.board))[0].to, "spawner"); }
-      else assert.equal(existsSync(r.board), false);
+      assert.equal(existsSync(r.board), false, "results live in the session, not on the board");
       assert.equal(readFileSync(join(dir, "calls.jsonl"), "utf8"), ""); assert.deepEqual(r.errors, []);
     } finally { await r.close(); }
   }
@@ -69,7 +68,7 @@ test("user cancellation: actual deferred-settle input, before_settle Escape and 
   try {
     r.faux.setResponses([fauxAssistantMessage("old"), fauxAssistantMessage("new")]); const first = r.session.prompt("first"); await started; await sleep(25);
     assert.equal(r.session.isIdle, true); assert.equal(r.session.pendingMessageCount, 0); assert.equal(r.shutdowns(), 0);
-    release(); await first; await sleep(20); assert.equal(r.shutdowns(), 1); assert.deepEqual((await readBoard(r.board)).map(n => n.message), ["new"]);
+    release(); await first; await sleep(20); assert.equal(r.shutdowns(), 1); assert.equal(lastReply(r.session.sessionManager, null)?.content[0].type === "text" && (lastReply(r.session.sessionManager, null)!.content[0] as any).text, "new");
   } finally { release(); await r.close(); }
   let ready!: () => void; let resume!: () => void; let once = true;
   const before = new Promise<void>(r => { ready = r; }); const blocked = new Promise<void>(r => { resume = r; });
@@ -92,16 +91,10 @@ test("startup identity: switching sessions or manually resuming without launch f
   finally { await manual.close(); }
 });
 
-test("write failure or reload cancels automatic exit and never retries a failed board write", async () => {
+test("reload before the exit tick cancels automatic exit", async () => {
   state(); const r = await runtime(true);
-  try { r.faux.setResponses([fauxAssistantMessage("done")]); await r.session.prompt("task"); await r.close(); await sleep(20); assert.equal(r.shutdowns(), 0); assert.equal((await readBoard(r.board)).length, 0); }
+  try { r.faux.setResponses([fauxAssistantMessage("done")]); await r.session.prompt("task"); await r.close(); await sleep(20); assert.equal(r.shutdowns(), 0); }
   finally { r.session.dispose(); }
-  const failed = await runtime(true);
-  try {
-    const cwd = failed.session.sessionManager.getCwd();
-    writeFileSync(join(cwd, ".pi"), "not a directory"); failed.faux.setResponses([fauxAssistantMessage("result")]); await failed.session.prompt("task"); await sleep(30);
-    assert.equal(failed.shutdowns(), 0); assert.ok(failed.notices.some(n => n.includes(failed.board))); rmSync(join(cwd, ".pi")); await sleep(30); assert.equal(existsSync(failed.board), false);
-  } finally { await failed.close(); }
 });
 
 test("session supervision: lost names and same-name replacement do not hide the old session; blocked is edge-triggered", async () => {
@@ -141,8 +134,8 @@ test("result and exit: a slow settled handler spans several polls; one result, n
   const r = await runtime(true, pi => { pi.on("agent_settled", async () => { if (once) { once = false; entered(); await hold; } else atSettled = count(); }); }, spawner);
   try {
     r.faux.setResponses([fauxAssistantMessage("old candidate"), fauxAssistantMessage("fresh response")]); const task = r.session.prompt("wait"); await started; state(); await sleep(3300);
-    assert.equal(results(spawner).length, 1); assert.equal(count(), 1); assert.equal(r.shutdowns(), 0); assert.equal((await readBoard(r.board)).length, 0);
-    release(); await task; await sleep(30); assert.equal(results(spawner).length, 1); assert.equal(atSettled, 0); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1); assert.equal((await readBoard(r.board))[0].message, "fresh response");
+    assert.equal(results(spawner).length, 1); assert.equal(count(), 1); assert.equal(r.shutdowns(), 0);
+    release(); await task; await sleep(30); assert.equal(results(spawner).length, 1); assert.equal(atSettled, 0); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1);
   } finally { release(); await r.close(); }
 });
 

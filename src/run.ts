@@ -3,7 +3,7 @@ import { getKeybindings } from "@earendil-works/pi-tui";
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { list, sessionBinding, sessionPath, type LiveAgent } from "./herdr.ts";
-import { MESSAGE_LIMIT, postSync } from "./board.ts";
+import { MESSAGE_LIMIT } from "./board.ts";
 import type { Snapshot } from "./presets.ts";
 import { waitingView } from "./ui.ts";
 
@@ -80,7 +80,7 @@ export function pendingRuns(manager: Pick<SessionManager, "getBranch" | "getEntr
   return runs;
 }
 
-export function lifecycle(pi: ExtensionAPI, board: () => string) {
+export function lifecycle(pi: ExtensionAPI) {
   for (const name of ["name", "spawner", "session", "boundary"]) pi.registerFlag(`swarm-${name}`, { type: "string", description: `Internal swarm launch ${name}.` });
   pi.registerFlag("swarm-detach", { type: "boolean", description: "Internal detached swarm launch.", default: false });
   const flag = (name: string) => pi.getFlag(`swarm-${name}`);
@@ -142,15 +142,7 @@ export function lifecycle(pi: ExtensionAPI, board: () => string) {
       const boundary = flag("boundary");
       const reply = lastReply(context.sessionManager, typeof boundary === "string" && boundary ? boundary : null);
       if (outcome === "aborted" || wasAborted(reply)) return;
-      const directory = board();
-      try {
-        const to = flag("detach") === true ? "*" : String(flag("spawner"));
-        postSync(directory, { from: String(flag("name")), to, kind: "result", message: finalSummary(reply, context.sessionManager.getSessionFile()!) });
-      } catch (error) {
-        context.ui.notify(`Swarm result not published to ${directory}; pane kept open: ${String(error)}`, "error");
-        return;
-      }
-      finished = true;
+      finished = true; // the result is the session's last reply; the spawner reads it after this exit
       context.shutdown();
     }, 0);
   }

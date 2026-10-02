@@ -3,29 +3,33 @@ import { constants, mkdirSync, openSync, closeSync, writeFileSync, linkSync, unl
 import { readdir, open, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
-export interface Note { from: string; to: string; message: string; kind: "message" | "result"; created: number; expires: number }
-type Input = Pick<Note, "from" | "to" | "message"> & Partial<Pick<Note, "kind">>;
+/** A notice an agent chose to post. The board holds nothing else: no private messages, no automatic results. */
+export interface Note { from: string; message: string; created: number; expires: number }
 export const DAY = 86_400;
 export const MESSAGE_LIMIT = 4000;
 export const boardPath = (root: string) => join(root, ".pi/swarm/board");
+
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
-const PATTERN = /^[a-z0-9_*-]{1,128}$/;
-/** Envelope fields are rendered into message headers, so they must be plain names or '*' patterns. */
-function validate(input: Input): void {
-  const target = typeof input.to === "string" && (NAME.test(input.to) || (input.to.includes("*") && PATTERN.test(input.to)));
-  if (typeof input.from !== "string" || !NAME.test(input.from) || !target) throw new Error("Invalid envelope sender or target.");
-  if (input.kind !== undefined && !["message", "result"].includes(input.kind)) throw new Error("Invalid envelope kind.");
-  if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Message must be nonempty.");
-  if (input.message.length > MESSAGE_LIMIT) throw new Error(`Message exceeds ${MESSAGE_LIMIT} characters; write the body to a file, then send a summary and file path.`);
+export function validateName(name: string): string {
+  if (!NAME.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
+  return name;
 }
-function makeNote(input: Input): Note {
-  validate(input);
-  const created = Date.now();
-  return { from: input.from, to: input.to, message: input.message, kind: input.kind ?? "message", created, expires: created + DAY * 1000 };
+/** An exact name, or a pattern with '*' anywhere (anchored, consecutive stars merged). Names are groups. */
+export function namePattern(address: string): (name: string) => boolean {
+  if (!address.includes("*")) { validateName(address); return name => name === address; }
+  if (!/^[a-z0-9_*-]{1,128}$/.test(address)) throw new Error("Wildcard addresses support only name characters and '*', not '?', brackets or other glob syntax.");
+  const pattern = new RegExp(`^${address.replace(/\*+/g, ".*")}$`);
+  return name => pattern.test(name);
 }
+export function checkMessage(message: string): string {
+  if (typeof message !== "string" || !message.trim()) throw new Error("Message must be nonempty.");
+  if (message.length > MESSAGE_LIMIT) throw new Error(`Message exceeds ${MESSAGE_LIMIT} characters; write the body to a file, then send a summary and file path.`);
+  return message;
+}
+
 function publish(path: string, note: Note): Note {
   mkdirSync(path, { recursive: true });
-  const fields = { from: note.from, to: note.to, kind: note.kind, created: new Date(note.created).toISOString(), expires: new Date(note.expires).toISOString() };
+  const fields = { from: note.from, created: new Date(note.created).toISOString(), expires: new Date(note.expires).toISOString() };
   const markdown = `---\n${Object.entries(fields).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join("\n")}\n---\n${note.message}`;
   for (let n = 1; ; n++) {
     const name = `${note.created}-${note.from}${n === 1 ? "" : `-${n}`}.md`;
@@ -35,6 +39,7 @@ function publish(path: string, note: Note): Note {
     try { fd = openSync(temp, "wx"); } catch (error: any) { if (error.code === "EEXIST") continue; throw error; }
     try {
       writeFileSync(fd, markdown);
+      // link fails atomically if the name exists, so a notice is never overwritten.
       try { linkSync(temp, file); return note; } catch (error: any) { if (error.code !== "EEXIST") throw error; }
     } finally {
       closeSync(fd);
@@ -42,13 +47,13 @@ function publish(path: string, note: Note): Note {
     }
   }
 }
-// Exit ticks only publish: no directory scan or expiration work on this synchronous path.
-export const postSync = (path: string, input: Input): Note => publish(path, makeNote(input));
-export async function post(path: string, input: Input, report?: (warning: string) => void): Promise<Note> {
-  const note = makeNote(input);
-  await readBoard(path, { limit: 1 }, report);
+export async function post(path: string, input: Pick<Note, "from" | "message">, report?: (warning: string) => void): Promise<Note> {
+  const created = Date.now();
+  const note = { from: validateName(input.from), message: checkMessage(input.message), created, expires: created + DAY * 1000 };
+  await scanBoard(path, report ?? (() => {})); // reclaim expired notices
   return publish(path, note);
 }
+
 function timestamp(value: unknown): number {
   const time = typeof value === "string" ? Date.parse(value) : NaN;
   if (!Number.isFinite(time)) throw new Error("Invalid timestamp.");
@@ -74,13 +79,12 @@ async function readCapped(file: string, report: (warning: string) => void): Prom
 function parseNote(text: string): Note | undefined {
   try {
     const { frontmatter: f, body } = parseFrontmatter(text);
-    if (typeof f.from !== "string" || typeof f.to !== "string" || (f.kind !== "message" && f.kind !== "result")) return undefined;
-    const note: Note = { from: f.from, to: f.to, kind: f.kind, message: body, created: timestamp(f.created), expires: timestamp(f.expires) };
-    validate(note);
+    if (typeof f.from !== "string" || !NAME.test(f.from)) return undefined;
+    const note: Note = { from: f.from, message: body, created: timestamp(f.created), expires: timestamp(f.expires) };
     return note.expires > note.created ? note : undefined;
   } catch { return undefined; }
 }
-/** Every unexpired note, newest first; reclaims expired files on the way. */
+/** Every unexpired notice, newest first; reclaims expired files on the way. */
 async function scanBoard(path: string, report: (warning: string) => void): Promise<Note[]> {
   let files: string[];
   try { files = (await readdir(path)).filter(f => f.endsWith(".md")).sort().reverse(); }
@@ -99,17 +103,18 @@ async function scanBoard(path: string, report: (warning: string) => void): Promi
   }
   return notes;
 }
-export async function readBoard(path: string, filter: { from?: string; to?: string; limit?: number } = {}, report: (warning: string) => void = console.warn): Promise<Note[]> {
+/** Recent notices, newest first; `from` is an exact name or a '*' pattern. */
+export async function readBoard(path: string, filter: { from?: string; limit?: number } = {}, report: (warning: string) => void = console.warn): Promise<Note[]> {
   const limit = filter.limit ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be 1..100.");
-  const matches = (note: Note) => (filter.from === undefined || note.from === filter.from) && (filter.to === undefined || note.to === filter.to);
-  return (await scanBoard(path, report)).filter(matches).slice(0, limit);
+  const matches = filter.from === undefined ? () => true : namePattern(filter.from);
+  return (await scanBoard(path, report)).filter(note => matches(note.from)).slice(0, limit);
 }
-/** Names that still sign retained notes: reusing one would make two agents indistinguishable on the board. */
+/** Names that still sign retained notices: reusing one would make two agents indistinguishable on the board. */
 export async function boardSenders(path: string): Promise<Set<string>> {
   return new Set((await scanBoard(path, () => {})).map(note => note.from));
 }
 export function formatNote(note: Note): string {
-  validate(note);
-  return `[swarm ${note.kind}] ${note.from} → ${note.to}\n${new Date(note.created).toISOString()} · expires ${new Date(note.expires).toISOString()}\n${note.message}`;
+  validateName(note.from);
+  return `[swarm notice] ${note.from}\n${new Date(note.created).toISOString()} · expires ${new Date(note.expires).toISOString()}\n${note.message}`;
 }

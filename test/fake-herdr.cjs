@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { readFileSync, appendFileSync, writeFileSync, readdirSync } = require('node:fs');
+const { readFileSync, appendFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const args = process.argv.slice(2);
 const dir = process.env.FAKE_HERDR_DIR;
@@ -41,10 +41,6 @@ else if (key === 'agent start') {
   state.agents.push({ name: args[2], pane_id: args[args.indexOf('--pane') + 1], agent: 'pi', cwd: state.lastCwd || dir, agent_status: 'idle', agent_session: { kind: 'path', value: i >= 0 ? args[i + 1] : '/tmp/test-session.jsonl' } });
   save(); ok({});
 } else if (key === 'agent prompt') {
-  if (state.checkBoard) {
-    const bodies = readdirSync(state.checkBoard).filter(f => f.endsWith('.md')).map(f => readFileSync(join(state.checkBoard, f), 'utf8').split('\n---\n')[1]);
-    if (!bodies.some(body => body && args[3].includes(body))) fail('not_persisted', 'notification preceded board write');
-  }
   const finish = () => {
     if (state.promptError || args[2] === 'blocked') fail(state.promptError || 'agent_blocked', 'prompt failed');
     if (!state.agents.some(a => a.name === args[2])) fail('agent_not_found', 'not online');

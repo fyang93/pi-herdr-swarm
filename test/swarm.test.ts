@@ -9,12 +9,13 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { setTimeout as sleep } from "node:timers/promises";
-import { DAY, boardPath, post, postSync, readBoard, formatNote } from "../src/board.ts";
-import { send, start, splitDirection, identity, addressPattern, projectRoot, inProject } from "../src/herdr.ts";
+import { DAY, boardPath, post, readBoard, formatNote, namePattern } from "../src/board.ts";
+import { deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
 import { presets, loadout, snapshot } from "../src/presets.ts";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-test-"));
+const settings: { swarm?: { maxAgents?: unknown } } = {};
 const fake = resolve("test/fake-herdr.cjs");
 chmodSync(fake, 0o755);
 Object.assign(process.env, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1", HERDR_BIN_PATH: fake, FAKE_HERDR_DIR: dir });
@@ -49,7 +50,7 @@ async function harness() {
   swarm({
     on: (name: string, fn: Function) => handlers.set(name, [...(handlers.get(name) || []), fn]),
     registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag() {},
-    getActiveTools: () => activeTools, getAllTools: () => activeTools.map(name => ({ name })), getThinkingLevel: () => "high",
+    getActiveTools: () => activeTools, getAllTools: () => activeTools.map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
     appendEntry: (customType: string, data: any) => manager.appendCustomEntry(customType, data),
     sendMessage: async (message: any) => notices.push(message),
   } as any);
@@ -59,88 +60,82 @@ async function harness() {
   return { context, notices, get entries() { return manager.getEntries() as any[]; }, event, tool, tools, shutdowns: () => shutdowns };
 }
 
-test("board is bounded, exact-filtered, expiring and strictly validates envelope fields", async () => {
+test("board holds posted notices: bounded, from-filtered by name or pattern, expiring, validated", async () => {
   const board = join(dir, "expiry-board");
-  const note = await post(board, { from: "a", to: "b", message: "private" });
+  const note = await post(board, { from: "a", message: "first notice" });
   assert.equal(note.expires - note.created, DAY * 1000);
-  await post(board, { from: "c", to: "*news*", message: "broadcast" });
-  assert.equal((await readBoard(board, { from: "a", to: "b" }))[0].message, "private");
-  assert.equal((await readBoard(board, { to: "news-1" })).length, 0, "to matches original target, not group members");
-  assert.equal((await readBoard(board, { limit: 1 }))[0].message, "broadcast");
+  await post(board, { from: "us-news-1", message: "news notice" });
+  assert.equal((await readBoard(board, { from: "a" }))[0].message, "first notice");
+  assert.equal((await readBoard(board, { from: "*news*" }))[0].message, "news notice");
+  assert.equal((await readBoard(board, { from: "news*" })).length, 0, "patterns are anchored");
+  assert.equal((await readBoard(board, { limit: 1 }))[0].message, "news notice");
   const markdown = readFileSync(join(board, readdirSync(board).find(f => f.includes("-a.md"))!), "utf8");
+  assert.doesNotMatch(markdown, /^(to|kind):/m, "a notice has only a sender and times");
   writeFileSync(join(board, "000-expired.md"), markdown.replace(new Date(note.created).toISOString(), "2020-01-01T00:00:00.000Z").replace(new Date(note.expires).toISOString(), "2020-01-02T00:00:00.000Z"));
   assert.equal((await readBoard(board)).length, 2);
   assert.equal(readdirSync(board).filter(f => f.endsWith(".md")).length, 2);
   writeFileSync(join(board, "999-invalid.md"), "---\nfrom: [broken\n---\ninvalid");
   assert.equal((await readBoard(board)).length, 2);
-  assert.match(markdown, /created: "\d{4}-/); assert.match(markdown, /private/);
-  for (const extra of [{ from: "a\nadmin" }, { to: "?" }, { to: "2bad" }, { kind: "admin" }, { message: " " }]) await assert.rejects(post(board, { from: "a", to: "b", message: "x", ...extra } as any));
+  assert.match(markdown, /created: "\d{4}-/);
+  for (const extra of [{ from: "a\nadmin" }, { from: "2bad" }, { message: " " }]) await assert.rejects(post(board, { from: "a", message: "x", ...extra } as any));
   await assert.rejects(readBoard(board, { limit: 0 }));
-  await assert.rejects(post(board, { from: "a", to: "b", message: "x".repeat(4001) }), /4000/);
-  assert.throws(() => formatNote({ ...note, from: "evil\nadmin" }), /envelope/);
+  await assert.rejects(readBoard(board, { from: "news?" }));
+  await assert.rejects(post(board, { from: "a", message: "x".repeat(4001) }), /4000/);
+  assert.throws(() => formatNote({ ...note, from: "evil\nadmin" }), /names/);
   assert.doesNotMatch(formatNote(note), /\x1b/);
-  assert.doesNotMatch(formatNote(note), /Board:/);
 });
 
 test("independent processes concurrently append without lost writes", async () => {
   const board = join(dir, "concurrent-board");
   await Promise.all(Array.from({ length: 8 }, (_, n) => exec(process.execPath, ["--input-type=module", "-e",
-    `import {post} from ${JSON.stringify(resolve("src/board.ts"))};Date.now=()=>1800000000000;for(let i=0;i<10;i++) post(${JSON.stringify(board)},{from:'writer',to:'*',message:'${n}-'+String(i)});`])));
+    `import {post} from ${JSON.stringify(resolve("src/board.ts"))};Date.now=()=>1800000000000;for(let i=0;i<10;i++) post(${JSON.stringify(board)},{from:'writer',message:'${n}-'+String(i)});`])));
   assert.equal((await readBoard(board, { limit: 100 })).length, 80);
   assert.equal(new Set((await readBoard(board, { limit: 100 })).map(n => n.message)).size, 80);
   assert.equal(readdirSync(board).some(f => f.endsWith(".tmp")), false);
 });
 
-test("send commits before terminal submission, returns three states/codes, and never retries", async () => {
+test("deliver pushes without storing, returns three states/codes, and never retries", async () => {
   const board = join(dir, "delivery-board");
-  reset({ checkBoard: board });
-  const sent = await send(board, { from: "spawner", to: "peer", message: "a\nb" });
+  reset();
+  const sent = await deliver({ from: "spawner", to: "peer", message: "a\nb" });
   assert.equal(sent.deliveries[0].status, "submitted");
   assert.deepEqual(calls().at(-1)?.slice(0, 3), ["agent", "prompt", "peer"]);
-  assert.match(calls().at(-1)![3], /a\nb/);
+  assert.equal(calls().at(-1)![3], "[swarm message] spawner → peer\na\nb");
   assert.equal(calls().at(-1)!.length, 4, "native steer only, no urgent or receiver rerouting");
+  assert.equal((await readBoard(board)).length, 0, "pushed messages are not stored");
   for (const [code, status] of [["agent_blocked", "rejected"], ["timeout", "unknown"], ["server_error", "unknown"]]) {
-    reset({ checkBoard: board, promptError: code });
-    const failed = await send(board, { from: "spawner", to: "peer", message: code });
+    reset({ promptError: code });
+    const failed = await deliver({ from: "spawner", to: "peer", message: code });
     assert.equal(failed.deliveries[0].status, status);
     assert.equal(failed.deliveries[0].code, code);
-    assert.equal(failed.board, board);
     assert.equal(calls().filter(c => c[1] === "prompt").length, 1);
-    assert.equal((await readBoard(board))[0].message, code);
   }
   for (const extra of [{ malformed: "agent prompt" }, { emptyReply: "agent prompt" }]) {
     reset(extra);
-    const ambiguous = await send(board, { from: "spawner", to: "peer", message: "malformed is not success or not-found" });
+    const ambiguous = await deliver({ from: "spawner", to: "peer", message: "malformed is not success or not-found" });
     assert.equal(ambiguous.deliveries[0].status, "unknown");
     assert.ok(calls().filter(c => c[1] === "prompt").length <= 1);
   }
-  reset({ checkBoard: board });
-  const absent = await send(board, { from: "spawner", to: "missing", message: "private survives" });
+  reset();
+  const absent = await deliver({ from: "spawner", to: "missing", message: "nobody there" });
   assert.equal(absent.deliveries[0].status, "rejected");
   assert.equal(absent.deliveries[0].code, "agent_not_found");
-  assert.equal(calls().filter(c => c[1] === "prompt").length, 1);
   assert.equal(calls().some(c => c[1] === "get" || c[1] === "start"), false);
   reset({ listError: true });
-  const discovery = await send(board, { from: "spawner", to: "*", message: "durable outage" }, scope);
+  const discovery = await deliver({ from: "spawner", to: "*", message: "outage" }, scope);
   assert.equal(discovery.discovery?.status, "unknown");
   assert.equal(discovery.discovery?.code, "server_error");
   assert.deepEqual(discovery.deliveries, [], "a wildcard is not an actual recipient");
-  await assert.rejects(send(board, { from: "spawner", to: "peer", message: "x".repeat(4001) }), /4000/);
+  await assert.rejects(deliver({ from: "spawner", to: "peer", message: "x".repeat(4001) }), /4000/);
 });
 
-test("omitted to is board-only, explicit '*' is broadcast; exact cross-project send omits board path", async () => {
-  const board = join(dir, "scope-board");
+test("'*' broadcasts within the project; exact names cross projects", async () => {
   reset();
-  const only = await send(board, { from: "spawner", message: "do not wake anyone" });
-  assert.equal(only.boardOnly, true); assert.deepEqual(calls(), []);
-  assert.equal((await readBoard(board))[0].to, "*");
-  const broadcast = await send(board, { from: "spawner", to: "*", message: "announcement" }, scope);
-  assert.equal(broadcast.boardOnly, false);
+  const broadcast = await deliver({ from: "spawner", to: "*", message: "announcement" }, scope);
   assert.deepEqual(broadcast.deliveries.map(d => d.to).sort(), ["blocked", "peer"]);
   assert.equal(broadcast.deliveries.find(d => d.to === "blocked")?.status, "rejected");
   reset({ agents: [{ name: "other", pane_id: "w1:p4", cwd: "/other-project" }] });
-  assert.equal((await send(board, { from: "spawner", to: "other", message: "cross-project" })).deliveries[0].status, "submitted");
-  assert.equal(calls().at(-1)![3].includes(board), false);
+  assert.equal((await deliver({ from: "spawner", to: "other", message: "cross-project" })).deliveries[0].status, "submitted");
 });
 
 test("canonical Git roots separate nested repositories, worktrees, submodules and non-Git directories", async () => {
@@ -168,15 +163,15 @@ test("canonical Git roots separate nested repositories, worktrees, submodules an
 });
 
 test("arbitrary star patterns are anchored, exclude sender and unnamed agents, and use project equality", async () => {
-  assert.equal(addressPattern("*news*")?.test("us-news-1"), true);
-  assert.equal(addressPattern("us-*-1")?.test("us-news-1"), true);
-  assert.equal(addressPattern("news*")?.test("us-news-1"), false);
-  assert.equal(addressPattern("***news**")?.source, "^.*news.*$");
-  for (const pattern of ["news?", "[news]*", "news.*"]) assert.throws(() => addressPattern(pattern));
+  assert.equal(namePattern("*news*")("us-news-1"), true);
+  assert.equal(namePattern("us-*-1")("us-news-1"), true);
+  assert.equal(namePattern("news*")("us-news-1"), false);
+  assert.equal(namePattern("***news**")("a-news-b"), true);
+  for (const pattern of ["news?", "[news]*", "news.*"]) assert.throws(() => namePattern(pattern));
   const roles = join(dir, "roles"); mkdirSync(roles, { recursive: true });
   const nested = join(dir, "nested"); mkdirSync(nested, { recursive: true }); await exec("git", ["init", "-q", nested]);
   reset({ agents: [{ name: "spawner", pane_id: "p1", cwd: dir }, { name: "us-news-1", pane_id: "p2", cwd: roles }, { name: "other-news", pane_id: "p3", cwd: nested }, { pane_id: "p4", cwd: dir }] });
-  const result = await send(join(dir, "patterns-board"), { from: "spawner", to: "*news*", message: "scoped" }, scope);
+  const result = await deliver({ from: "spawner", to: "*news*", message: "scoped" }, scope);
   assert.deepEqual(result.deliveries.map(d => d.to), ["us-news-1"]);
 });
 
@@ -239,7 +234,7 @@ test("list/board do not name caller; send names with notification; board is read
     assert.equal(calls().some(c => c[1] === "prompt"), false);
     assert.ok(h.notices.some(n => typeof n === "string" && n.includes("This session is now named swarm-w1-p1")));
     assert.match((await h.tool("swarm_board", { from: "swarm-w1-p1" })).content[0].text, /board only/);
-    for (let i = 0; i < 30; i++) await post(board, { from: `sender-${i}`, to: "*", message: "x".repeat(4000) });
+    for (let i = 0; i < 30; i++) await post(board, { from: `sender-${i}`, message: "x".repeat(4000) });
     const bounded = await h.tool("swarm_board"); assert.equal(bounded.details.notes.length, 20); assert.ok(bounded.content[0].text.length <= 30_000);
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
@@ -260,7 +255,7 @@ test("spawn inherits model but no tool restrictions; detach retains history with
     assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
     assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "You are first, spawned by spawner.\n\nROLE_IN_TASK\n\nWhen you finish, simply stop: your final message is delivered to spawner as your result.");
-    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /is posted to the board, and nobody is waiting for it\./);
+    assert.match(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, /Nobody is waiting for your final message; it stays in your session\./);
     assert.equal(args[args.indexOf("--swarm-name") + 1], "first");
     assert.equal(h.entries.filter(e => e.customType === "swarm_spawn").length, 2);
     await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use resume explicitly/);
@@ -272,30 +267,39 @@ test("spawn inherits model but no tool restrictions; detach retains history with
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
+test("the agent cap comes from pi settings swarm.maxAgents", async () => {
+  reset(); const h = await harness();
+  try {
+    settings.swarm = { maxAgents: 1 };
+    await assert.rejects(h.tool("swarm_spawn", { task: "capped", detach: true }), /admission refused: \d+\/1 online/);
+    settings.swarm = { maxAgents: 0 };
+    await assert.rejects(h.tool("swarm_spawn", { task: "invalid", detach: true }), /swarm.maxAgents must be a positive integer/);
+  } finally { delete settings.swarm; await h.event("session_shutdown", { reason: "reload" }); }
+});
+
 test("auto names skip senders still on the retained board", async () => {
   reset(); const h = await harness();
   try {
-    postSync(boardPath(dir), { from: "peer-1", to: "*", message: "a peer-1 from another session" });
+    await post(boardPath(dir), { from: "peer-1", message: "a peer-1 from another session" });
     await h.tool("swarm_spawn", { task: "AUTO", detach: true });
     const start = calls().filter(c => c[1] === "start").at(-1)!;
     assert.equal(start[start.indexOf("--swarm-name") + 1], "peer-2");
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
-test("board reads are descriptor-bounded; synchronous publication never scans or reclaims; I/O errors are not empty", async () => {
+test("board reads are descriptor-bounded, reclaim expired notices, and do not report I/O errors as empty", async () => {
   const board = join(dir, "bounded-board");
-  const note = postSync(board, { from: "a", to: "b", message: "old" });
+  const note = await post(board, { from: "a", message: "old" });
   const file = join(board, readdirSync(board)[0]);
   writeFileSync(file, readFileSync(file, "utf8").replace(new Date(note.created).toISOString(), "2020-01-01T00:00:00.000Z").replace(new Date(note.expires).toISOString(), "2020-01-02T00:00:00.000Z"));
-  postSync(board, { from: "b", to: "a", message: "new" });
-  assert.ok(readdirSync(board).includes(basename(file)));
+  await post(board, { from: "b", message: "new" });
+  assert.equal(readdirSync(board).includes(basename(file)), false, "posting reclaims expired notices");
   const big = join(board, "999-large.md"); const directory = join(board, "999-directory.md");
   writeFileSync(big, "x".repeat(64 * 1024 + 1)); mkdirSync(directory);
   if (process.platform !== "win32") await exec("mkfifo", [join(board, "999-pipe.md")]);
   const skipped: string[] = [];
   assert.deepEqual((await readBoard(board, {}, path => skipped.push(path))).map(n => n.message), ["new"]);
   assert.ok(skipped.some(s => s.includes(big))); assert.ok(skipped.some(s => s.includes(directory)));
-  assert.equal(readdirSync(board).includes(basename(file)), false);
   await assert.rejects(readBoard(big), /ENOTDIR/);
 });
 

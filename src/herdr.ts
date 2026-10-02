@@ -3,7 +3,8 @@ import { promisify } from "node:util";
 import { resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { post, formatNote, type Note } from "./board.ts";
+import { checkMessage, namePattern, validateName } from "./board.ts";
+export { validateName };
 
 const exec = promisify(execFile);
 export class HerdrError extends Error {
@@ -84,10 +85,6 @@ async function prompt(to: string, text: string): Promise<void> {
 export function requireHerdr(): void {
   if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) throw new Error("Start pi inside a herdr pane.");
 }
-export function validateName(name: string): string {
-  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
-  return name;
-}
 export function availableName(base: string, agents: LiveAgent[], history: Iterable<string> = []): string {
   base = base.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z]+/, "").slice(0, 26) || "swarm";
   const used = new Set([...agents.map(a => a.name), ...history]);
@@ -107,11 +104,6 @@ export async function identity(named?: (name: string) => void): Promise<string> 
   return confirmed.name;
 }
 
-export function addressPattern(address: string): RegExp | undefined {
-  if (!address.includes("*")) { validateName(address); return undefined; }
-  if (!/^[a-z0-9_*-]{1,128}$/.test(address)) throw new Error("Wildcard addresses support only name characters and '*', not '?', brackets or other glob syntax.");
-  return new RegExp(`^${address.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, ".*")}$`);
-}
 export interface Delivery { to: string; status: "submitted" | "rejected" | "unknown"; code?: string; error?: string }
 export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
   if (error === undefined) return { status: "submitted" };
@@ -119,32 +111,33 @@ export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
   const rejected = ["agent_not_found", "not_found", "agent_blocked", "agent_not_ready", "invalid_params", "unsupported_agent"].includes(code);
   return { status: rejected ? "rejected" : "unknown", code: typeof code === "string" ? code : undefined, error: String(error) };
 }
-/** Commit before discovery and native steer (text + Enter). Never replay an uncertain submission. */
-export async function send(path: string, input: Pick<Note, "from" | "message"> & Partial<Pick<Note, "to" | "kind">>, project?: { root: string; roots: Map<string, string> }, report?: (warning: string) => void) {
-  const board = resolve(path);
-  const boardOnly = input.to === undefined;
-  const pattern = boardOnly ? undefined : addressPattern(input.to!);
-  const note = await post(board, { ...input, to: input.to ?? "*" }, report);
+/**
+ * Push a message to an exact name (any project) or a '*' pattern (named agents in the same project, not the
+ * sender), as native herdr steer (text + Enter). Nothing is stored. Never replays an uncertain submission.
+ */
+export async function deliver(input: { from: string; to: string; message: string }, project?: { root: string; roots: Map<string, string> }) {
+  const message = checkMessage(input.message);
+  const matches = namePattern(input.to);
   const deliveries: Delivery[] = [];
-  if (boardOnly) return { board, note, deliveries, boardOnly };
   let targets: string[];
   try {
-    if (pattern) {
+    if (input.to.includes("*")) {
       const scope = project ?? { root: await projectRoot(process.cwd()), roots: new Map<string, string>() };
-      const agents = (await list()).filter(a => a.name && a.name !== input.from && pattern.test(a.name));
+      const agents = (await list()).filter(a => a.name && a.name !== input.from && matches(a.name));
       targets = [];
       for (const agent of agents) if (await inProject(agent, scope.root, scope.roots)) targets.push(agent.name!);
-    } else targets = [input.to!];
+    } else targets = [input.to];
   } catch (error) {
-    return { board, note, deliveries, boardOnly, discovery: deliveryOutcome(error) };
+    return { deliveries, discovery: deliveryOutcome(error) };
   }
+  const text = `[swarm message] ${validateName(input.from)} → ${input.to}\n${message}`;
   deliveries.push(...await Promise.all(targets.map(async (to): Promise<Delivery> => {
     try {
-      await prompt(to, formatNote(note));
+      await prompt(to, text);
       return { to, ...deliveryOutcome() };
     } catch (error) { return { to, ...deliveryOutcome(error) }; }
   })));
-  return { board, note, deliveries, boardOnly };
+  return { deliveries };
 }
 
 export function splitDirection(width: number, height: number): "right" | "down" | undefined {
@@ -174,7 +167,7 @@ export function start(launch: Launch): Promise<{ name: string; pane: string }> {
     if (agents.some(a => a.name === launch.name)) throw new Error(`Agent ${launch.name} is already live.`);
     if (launch.resume && launch.session && sessionBinding(agents, launch.session)) throw new Error(`Session is already live: ${launch.session}`);
     const max = launch.maxAgents ?? 16;
-    if (!Number.isSafeInteger(max) || max <= 0) throw new Error("PI_SWARM_MAX_AGENTS must be a positive integer.");
+    if (!Number.isSafeInteger(max) || max <= 0) throw new Error("swarm.maxAgents must be a positive integer.");
     const target = await projectRoot(launch.cwd);
     let count = 0;
     const roots = new Map<string, string>();

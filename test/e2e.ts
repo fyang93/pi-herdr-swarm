@@ -25,7 +25,7 @@ const base = mkdtempSync(join(tmpdir(), "swarm-e2e-")); const dir = join(base, "
 mkdirSync(dir); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 copyFileSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), "extensions/herdr-agent-state.ts"), join(agentDir, "extensions/herdr-agent-state.ts"));
 writeFileSync(join(agentDir, "extensions/demo.ts"), `export {default} from ${JSON.stringify(resolve("test/e2e-peer.ts"))};`);
-writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" }));
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off", swarm: { maxAgents: 3 } }));
 const file = join(dir, "spawner.jsonl"); const board = boardPath(dir);
 const marker = (steps: { tool: string; args: any }[]) => `SWARM_TEST:${JSON.stringify({ steps })}`;
 const step = (tool: string, args: any = {}) => ({ tool, args });
@@ -50,11 +50,11 @@ async function invoke(tool: string, args: any = {}): Promise<any> {
 async function finish(name: string, count = 1) { await ended(name); await wait(() => results(name).length === count, `${name} archived`); await ready("demo-spawner"); }
 let running = false; try { await cli(["agent", "list"]); running = true; } catch {}
 assert.equal(running, false, `Private server ${server} already exists; refusing to reuse it.`);
-const daemon = spawn("herdr", ["--session", server, "server"], { env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_SWARM_E2E: "1", PI_SWARM_MAX_AGENTS: "3" }, stdio: "ignore" });
+const daemon = spawn("herdr", ["--session", server, "server"], { env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_SWARM_E2E: "1" }, stdio: "ignore" });
 try {
   await wait(() => cli(["agent", "list"]), "private server startup");
   assert.equal((await live()).length, 0);
-  const created = await cli(["workspace", "create", "--no-focus", "--label", "swarm-demo", "--cwd", dir, "--env", `PI_CODING_AGENT_DIR=${agentDir}`, "--env", "PI_SWARM_E2E=1", "--env", "PI_SWARM_MAX_AGENTS=3"]);
+  const created = await cli(["workspace", "create", "--no-focus", "--label", "swarm-demo", "--cwd", dir, "--env", `PI_CODING_AGENT_DIR=${agentDir}`, "--env", "PI_SWARM_E2E=1"]);
   workspace = created.workspace.workspace_id; pane = created.root_pane.pane_id;
   await startSpawner();
   const taskA = marker([step("e2e_wait", { file: "start" }), step("swarm_send", { to: "demo-b", message: "A_DIRECT" }), step("swarm_send", { to: "*", message: "A_BROADCAST" }), step("e2e_wait", { file: "finish" })]);
@@ -73,15 +73,17 @@ try {
   assert.equal((await invoke("swarm_spawn", { resume: "demo-a", task: "no duplicate process" })).isError, true);
   await cli(["agent", "rename", a.pane, "demo-a"]);
   barrier("start");
-  await wait(async () => { const notes = await readBoard(board); return ["A_DIRECT", "B_DIRECT", "A_BROADCAST"].every(text => notes.some(n => n.message === text)); }, "mutual sends and broadcast");
+  const received = (session: string, text: string) => readSession(session).getBranch().some(e => e.type === "message" && e.message.role === "user" && JSON.stringify(e.message.content).includes(text));
+  await sleep(3000); // let both peers send while blocked in their wait tool; steers land after it returns
   barrier("finish"); await finish("demo-a"); await finish("demo-b");
-  assert.ok(readSession(record("demo-b").session).getBranch().some(e => e.type === "message" && e.message.role === "user" && JSON.stringify(e.message.content).includes("A_DIRECT")));
-  assert.ok(readSession(a.session).getBranch().some(e => e.type === "message" && e.message.role === "user" && JSON.stringify(e.message.content).includes("B_DIRECT")));
+  assert.ok(received(record("demo-b").session, "A_DIRECT") && received(record("demo-b").session, "A_BROADCAST") && received(a.session, "B_DIRECT"), "mutual sends and broadcast");
+  assert.deepEqual((await readBoard(board)).map(n => n.message), ["BOARD_ONLY"], "pushed messages are not stored on the board");
   console.log("communication: native mutual messages, broadcast and board-only passed");
 
   await invoke("swarm_spawn", { name: "detached", task: marker([]), detach: true }); await ended("detached");
-  await wait(async () => (await readBoard(board)).some(n => n.from === "detached" && n.kind === "result" && n.to === "*"), "detached board result");
   assert.equal(record("detached").detach, true); assert.equal(results("detached").length, 0);
+  assert.equal((await readBoard(board)).some(n => n.from === "detached"), false, "nothing is posted automatically");
+  assert.ok(readSession(record("detached").session).getBranch().some(e => e.type === "message" && e.message.role === "assistant"), "its final reply stays in its session");
   const boundary = readSession(a.session).getLeafId();
   await invoke("swarm_spawn", { resume: "demo-a", task: marker([]) }); await finish("demo-a", 2);
   assert.equal(record("demo-a").session, a.session); assert.equal(record("demo-a").boundary, boundary);
