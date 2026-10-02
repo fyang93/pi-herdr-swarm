@@ -10,7 +10,7 @@ export const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url
 const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
 export interface Preset { name: string; description: string; body: string; fields: Record<string, unknown> }
 /** Resolved launch configuration, saved in the spawn record for resume. `prompt` is appended to pi's system prompt. */
-export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string }
+export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string; extensionLoaded?: boolean }
 export function presets(cwd: string, trusted: boolean): Preset[] {
   const found = new Map<string, Preset>();
   for (const dir of [join(agentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
@@ -34,11 +34,15 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
   if (!selected) throw new Error(`Model unavailable: ${requested || "select a model before spawning"}`);
   const level = String(f.thinking ?? thinking);
   if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) throw new Error(`Invalid thinking level: ${level}`);
-  return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined };
+  const settings = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return {}; } };
+  const hasPackage = (value: any) => (Array.isArray(value.packages) ? value.packages : []).some((pkg: any) => String(typeof pkg === "string" ? pkg : pkg?.source ?? "").replace(/\/$/, "").endsWith("pi-herdr-swarm"));
+  const globalSettings = settings(join(agentDir(), "settings.json"));
+  const projectSettings = context.isProjectTrusted?.() ? settings(join(await (await import("./herdr.ts")).projectRoot(cwd), ".pi/settings.json")) : {};
+  return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined, extensionLoaded: hasPackage(globalSettings) || hasPackage(projectSettings) };
 }
 /** pi command-line arguments that reproduce a snapshot. */
 export function loadout(config: Snapshot, session: string): string[] {
-  const args = ["--session", session, "-e", extensionPath, "--model", config.model, "--thinking", config.thinking];
+  const args = ["--session", session, ...(config.extensionLoaded ? [] : ["-e", extensionPath]), "--model", config.model, "--thinking", config.thinking];
   if (config.prompt) {
     const path = join(dirname(session), "system.md");
     writeFileSync(path, config.prompt);

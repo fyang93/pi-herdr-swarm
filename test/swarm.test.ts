@@ -226,6 +226,8 @@ test("optional presets snapshot only configuration, respect trust and override o
   assert.equal(selected.model, "openai/gpt-4.1"); assert.equal(selected.thinking, "off");
   const args = loadout(selected, join(dir, "session.jsonl"));
   assert.equal(args.includes("--tools"), false); assert.equal(args.includes("--no-tools"), false);
+  assert.ok(args.includes("-e"));
+  assert.equal(loadout({ ...selected, extensionLoaded: true }, join(dir, "session.jsonl")).includes("-e"), false);
   assert.equal(readFileSync(join(dir, "system.md"), "utf8"), "Project body");
   assert.deepEqual(args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
   for (const fields of [{ "session-mode": "fork" }, { cli: "claude" }]) await assert.rejects(snapshot({ ...preset, fields }, context, "high", {}));
