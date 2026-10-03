@@ -36,7 +36,9 @@ test("each tool call names its action and objects; only expanded calls show full
     ["swarm_spawn", { agent: "worker", name: "auth-review", task: "First preview\nSECOND_FULL_LINE" }, /spawn worker → auth-review/],
     ["swarm_send", { to: "*news*", message: "First preview\nSECOND_FULL_LINE" }, /send → \*news\*/],
     ["swarm_list", {}, /list · agents \+ presets/],
-    ["swarm_send", { message: "First preview\nSECOND_FULL_LINE" }, /post · board/],
+    ["swarm_board", { message: "First preview\nSECOND_FULL_LINE" }, /post · board/],
+    ["swarm_send", {}, /send → …/],
+    ["swarm_board", { message: "", from: "peer*", limit: 5 }, /post · board/],
     ["swarm_spawn", { task: "First preview\nSECOND_FULL_LINE", detach: true }, /spawn inherited → … · detached/],
     ["swarm_board", { from: "peer*", limit: 5 }, /board · from=peer\* · limit=5/],
   ];
@@ -128,10 +130,15 @@ test("send distinguishes submitted/rejected/unknown; a post shows the board and 
   assert.match(lines.join(""), /\x1b\[38;5;214m\? unknown/);
   assert.match(lines.join(""), /\x1b\[38;5;196mherdr agent_blocked/);
   assert.doesNotMatch(output, /read|acknowledged|Board:|\d{4}-\d\d-\d\d/, "pushed messages are not stored");
-  const only = rendered(result("wire", { board: "/source/board/", note, deliveries: [], boardOnly: true }), false, {}, "swarm_send");
+  const only = rendered(result("wire", { board: "/source/board/", note, deliveries: [], boardOnly: true }));
   assert.match(plain(only.render(80)), /posted · board only/);
   assert.match(plain(only.render(80)), /expires in (22|23)h/); assert.match(plain(only.render(80)), /Board: \/source\/board\//);
-  assert.doesNotMatch(plain(only.render(80)), /No matching|recipients/);
+  assert.doesNotMatch(plain(only.render(80)), /No matching|recipients|wire/);
+  for (const expanded of [false, true]) for (const width of [1, 4, 8, 20, 80]) {
+    const lines = rendered(result("wire", { board: "/source/board/", note, deliveries: [], boardOnly: true }), expanded).render(width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    if (!expanded) assert.ok(lines.length <= 8);
+  }
 });
 
 test("list preserves actual statuses; waiting widget is a single warning-aware line", () => {
@@ -154,9 +161,13 @@ test("list preserves actual statuses; waiting widget is a single warning-aware l
   for (const width of [1, 4, 8, 20, 80]) { const lines = widget.render(width); assert.equal(lines.length, 1); assert.ok(visibleWidth(lines[0]) <= width); }
 });
 
-test("native validation details are not mistaken for delivery details", () => {
-  const output = plain(rendered(result("message exceeds 4000 characters", { validationErrors: [{ path: "/message" }] }), true, { isError: true }, "swarm_send").render(60));
-  assert.match(output, /message exceeds 4000/);
+test("native validation details are not mistaken for delivery or board details", () => {
+  for (const tool of ["swarm_send", "swarm_board"]) {
+    const value = result("message exceeds 4000 characters", { validationErrors: [{ path: "/message" }] });
+    const output = plain(rendered(value, true, { isError: true }, tool).render(60));
+    assert.match(output, /message exceeds 4000/);
+    assert.match(plain(rendered(value, true, {}, tool).render(60)), /message exceeds 4000/);
+  }
 });
 
 test("unknown notices use custom-message background and warning, never success", () => {

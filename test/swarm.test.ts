@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, validateToolArguments } from "@earendil-works/pi-ai";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DAY, boardPath, post, readBoard, formatNote, namePattern } from "../src/board.ts";
 import { deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
@@ -241,20 +241,61 @@ test("optional presets snapshot only configuration, respect trust and override o
   delete process.env.PI_CODING_AGENT_DIR;
 });
 
-test("list/board do not name caller; send names with notification; board is read-only and capped", async () => {
+test("list/board reads do not name caller; board posts name with notification and reads stay capped", async () => {
   reset({ agents: [{ pane_id: "w1:p1", agent: "pi" }] });
   const board = boardPath(dir); const h = await harness();
   try {
     await h.tool("swarm_list"); await h.tool("swarm_board");
     assert.equal(calls().some(c => c[1] === "rename"), false);
-    assert.equal(h.tools.get("swarm_board").parameters.properties.message, undefined);
-    const result = await h.tool("swarm_send", { message: "board only" });
+    const params = validateToolArguments(h.tools.get("swarm_board"), { type: "toolCall", id: "test", name: "swarm_board", arguments: { message: "board only", from: "someone-else", limit: 1 } });
+    const result = await h.tool("swarm_board", params);
     assert.match(result.content[0].text, /posted · board only/);
-    assert.equal(calls().some(c => c[1] === "prompt"), false);
+    assert.equal(result.isError, false);
+    assert.equal(result.details.board, board);
+    assert.equal(result.details.boardOnly, true);
+    assert.deepEqual(result.details.deliveries, []);
+    assert.equal(result.details.note.from, "swarm-w1-p1", "from cannot override the posting identity");
+    assert.equal(result.details.note.message, "board only");
+    assert.equal(result.details.note.expires - result.details.note.created, DAY * 1000);
+    assert.match(result.content[0].text, new RegExp(new Date(result.details.note.expires).toISOString()));
+    assert.equal(calls().some(c => c[1] === "prompt" || c[1] === "start"), false);
     assert.ok(h.notices.some(n => typeof n === "string" && n.includes("This session is now named swarm-w1-p1")));
     assert.match((await h.tool("swarm_board", { from: "swarm-w1-p1" })).content[0].text, /board only/);
+    assert.equal((await h.tool("swarm_board", { from: "someone-else" })).details.notes.length, 0);
+    assert.equal((await h.tool("swarm_board", { from: "*w1*", limit: 1 })).details.notes.length, 1);
+    for (const message of ["", " ", "x".repeat(4001)]) await assert.rejects(h.tool("swarm_board", { message }), /nonempty|4000/);
+    assert.equal((await readBoard(board)).length, 1, "invalid messages never post or fall back to reading");
+    const maximum = await h.tool("swarm_board", { message: "x".repeat(4000) });
+    assert.equal(maximum.details.note.message.length, 4000);
+    assert.equal(calls().filter(c => c[1] === "rename").length, 1, "existing identity is preserved");
     for (let i = 0; i < 30; i++) await post(board, { from: `sender-${i}`, message: "x".repeat(4000) });
     const bounded = await h.tool("swarm_board"); assert.equal(bounded.details.notes.length, 20); assert.ok(bounded.content[0].text.length <= 30_000);
+  } finally { await h.event("session_shutdown", { reason: "reload" }); }
+});
+
+test("board/send schemas validate posting and reading; send requires a recipient and never posts", async () => {
+  reset(); const h = await harness();
+  const validate = (name: string, args: any) => validateToolArguments(h.tools.get(name), { type: "toolCall", id: "test", name, arguments: args });
+  try {
+    for (const args of [{}, { from: "peer*", limit: 100 }, { message: "notice" }]) assert.deepEqual(validate("swarm_board", args), args);
+    for (const args of [{ message: "" }, { message: "x".repeat(4001) }, { limit: 0 }, { limit: 101 }, { message: "notice", to: "peer" }]) assert.throws(() => validate("swarm_board", args), /Validation failed/);
+    await assert.rejects(h.tool("swarm_board", { limit: 1.5 }), /limit must be 1..100/);
+    assert.throws(() => validate("swarm_send", { message: "no recipient" }), /to/);
+    assert.throws(() => validate("swarm_send", { to: "", message: "empty recipient" }), /Validation failed/);
+    const before = await readBoard(boardPath(dir), { limit: 100 });
+    for (const to of ["peer", "*"]) {
+      const result = await h.tool("swarm_send", validate("swarm_send", { to, message: "push only" }));
+      assert.ok(result.details.deliveries.some((d: any) => d.to === "peer" && d.status === "submitted"));
+      assert.equal(result.details.note, undefined);
+      assert.equal(result.details.boardOnly, undefined);
+    }
+    assert.deepEqual(await readBoard(boardPath(dir), { limit: 100 }), before);
+    const env = process.env.HERDR_ENV;
+    try {
+      delete process.env.HERDR_ENV;
+      await h.tool("swarm_board");
+      await assert.rejects(h.tool("swarm_board", { message: "requires herdr" }), /inside a herdr pane/);
+    } finally { process.env.HERDR_ENV = env; }
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 

@@ -64,9 +64,13 @@ try {
   const a = record("demo-a");
 
   // Native terminal connection and delivery, not fake-herdr error classification.
-  await invoke("swarm_send", { message: "BOARD_ONLY" });
+  const posted = await invoke("swarm_board", { message: "BOARD_ONLY" });
+  assert.equal(posted.isError, false);
+  assert.equal(posted.details.boardOnly, true);
+  assert.match((await invoke("swarm_board", { from: "demo-spawner", limit: 1 })).content[0].text, /BOARD_ONLY/);
+  assert.equal((await invoke("swarm_send", { message: "MISSING_TO" })).isError, true);
   assert.ok((await readBoard(board)).some(n => n.message === "BOARD_ONLY"));
-  const tooLong = await invoke("swarm_send", { message: "x".repeat(4001) }); assert.equal(tooLong.isError, true);
+  const tooLong = await invoke("swarm_board", { message: "x".repeat(4001) }); assert.equal(tooLong.isError, true);
   const capped = await invoke("swarm_spawn", { name: "too-many", task: "no launch" }); assert.equal(capped.isError, true);
   assert.equal((await live()).some(a => a.name === "too-many"), false);
   await cli(["agent", "rename", a.pane, "--clear"]); await sleep(2200); assert.equal(results("demo-a").length, 0);

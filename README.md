@@ -19,7 +19,7 @@ swarm_spawn({ resume: "review-1", task: "Now review the follow-up change." });
 
 swarm_send({ to: "review-1", message: "Also check input validation." });
 swarm_send({ to: "*review*", message: "The change is ready." });   // every matching agent in this project
-swarm_send({ message: "Notes are in reports/notes.md" });          // a notice on the board, wakes nobody
+swarm_board({ message: "Notes are in reports/notes.md" });         // a notice on the board, wakes nobody
 
 swarm_list();
 swarm_board({ from: "*review*", limit: 10 });
@@ -29,10 +29,10 @@ swarm_board({ from: "*review*", limit: 10 });
 |---|---|
 | `swarm_spawn({task, agent?, name?, model?, cwd?, detach?})` | Starts a fresh pi in a new pane and returns immediately. The role goes in `task`. Its final reply comes back to you when it ends. With `detach`, nobody waits and nothing comes back; the reply stays in its session. |
 | `swarm_spawn({resume, task, detach?})` | Continues one of your ended runs with its full context and saved configuration. |
-| `swarm_send({message, to})` | Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. Nothing is stored. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
-| `swarm_send({message})` | Posts a notice on the project board, readable by every agent for 24 hours. Wakes nobody. |
+| `swarm_send({message, to})` | Requires `to`. Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. Nothing is stored. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
+| `swarm_board({message})` | Posts a notice on the project board, readable by every agent for 24 hours. Wakes nobody. `from` and `limit` are ignored when posting. |
 | `swarm_list()` | Online agents (name, state, pane) and available presets. |
-| `swarm_board({from?, limit?})` | Recent notices, newest first; `from` is a name or a `*` pattern. |
+| `swarm_board({from?, limit?})` | Without `message`, reads recent notices, newest first (20 default, 100 max); `from` is a name or a `*` pattern. |
 
 ## How a run works
 
@@ -55,11 +55,11 @@ Two compositions:
 
 ```typescript
 // Share a finding, then point the group at it.
-swarm_send({ message: "The flaky test comes from a shared temp dir; details in reports/flaky.md" });
+swarm_board({ message: "The flaky test comes from a shared temp dir; details in reports/flaky.md" });
 swarm_send({ to: "*test*", message: "Posted the flaky-test finding on the board." });
 
 // Announce what you are taking on, so others can see it before starting the same work.
-swarm_send({ message: "Taking: migrate the config loader" });
+swarm_board({ message: "Taking: migrate the config loader" });
 ```
 
 An announcement is not a lock: two agents can announce the same work at nearly the same moment and both proceed. When only one executor may act, the host must enforce it.

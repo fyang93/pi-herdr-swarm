@@ -89,10 +89,10 @@ export const spawnResult: Renderer = (result, options, theme, context) => result
   return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}${data.detached ? " · detached" : ""}`) : theme.fg("toolOutput", output(result)), width);
 });
 export const sendResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
-  const data = result.details as { board?: string; note?: Note; deliveries: Delivery[]; boardOnly: boolean; discovery?: Omit<Delivery, "to"> } | undefined;
+  const data = result.details as { deliveries: Delivery[]; discovery?: Omit<Delivery, "to"> } | undefined;
   if (!Array.isArray(data?.deliveries)) return textLines(theme.fg(context.isError ? "error" : "toolOutput", output(result)), width);
   const count = (status: Delivery["status"]) => data.deliveries.filter(d => d.status === status).length;
-  const lines = textLines(data.boardOnly ? theme.fg("success", "posted · board only") : theme.fg("dim", `${data.deliveries.length} recipients · ${count("submitted")} submitted · ${count("rejected")} rejected · ${count("unknown")} unknown`), width);
+  const lines = textLines(theme.fg("dim", `${data.deliveries.length} recipients · ${count("submitted")} submitted · ${count("rejected")} rejected · ${count("unknown")} unknown`), width);
   for (const delivery of data.deliveries) {
     const color = delivery.status === "submitted" ? "success" : delivery.status === "rejected" ? "error" : "warning";
     const icon = delivery.status === "submitted" ? "✓" : delivery.status === "rejected" ? "✗" : "?";
@@ -100,9 +100,7 @@ export const sendResult: Renderer = (result, options, theme, context) => resultV
     if (delivery.error) lines.push(...textLines(theme.fg(color, delivery.error), width));
   }
   if (data.discovery) lines.push(...textLines(theme.fg("warning", `Recipient discovery ${data.discovery.status}${data.discovery.code ? ` [${data.discovery.code}]` : ""}: ${data.discovery.error}`), width));
-  else if (!data.boardOnly && !data.deliveries.length) lines.push(...textLines(theme.fg("warning", "No matching named agents to notify."), width));
-  if (data.note) lines.push(...textLines(theme.fg("dim", "posted · ") + expiry(data.note, theme), width));
-  if (data.board) lines.push(...textLines(theme.fg("dim", `Board: ${data.board}`), width));
+  else if (!data.deliveries.length) lines.push(...textLines(theme.fg("warning", "No matching named agents to notify."), width));
   return lines;
 });
 export const listResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
@@ -117,8 +115,13 @@ export const listResult: Renderer = (result, options, theme, context) => resultV
 });
 export const boardResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { notes: Note[]; skipped?: string[] } | undefined;
-  if (!data) return textLines(theme.fg("toolOutput", output(result)), width);
+  const data = result.details as { board: string; note: Note; boardOnly: true } | { notes: Note[]; skipped?: string[]; boardOnly?: false } | undefined;
+  if (data?.boardOnly) return [
+    ...textLines(theme.fg("success", "posted · board only"), width),
+    ...textLines(theme.fg("dim", "posted · ") + expiry(data.note, theme), width),
+    ...textLines(theme.fg("dim", `Board: ${data.board}`), width),
+  ];
+  if (!Array.isArray(data?.notes)) return textLines(theme.fg("toolOutput", output(result)), width);
   const lines = textLines(theme.fg("dim", `${data.notes.length} ${data.notes.length === 1 ? "notice" : "notices"}`), width);
   for (const note of data.notes) lines.push(...noteLines(note, width, options.expanded, theme));
   if (!data.notes.length) lines.push(...textLines(theme.fg("dim", "No notices."), width));
