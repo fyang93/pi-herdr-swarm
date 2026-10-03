@@ -2,7 +2,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 import { realpath } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { checkMessage, namePattern, validateName } from "./board.ts";
 export { validateName };
 
@@ -88,6 +90,7 @@ export async function ensurePiIntegration(notify: (message: string) => void): Pr
   const status = String(await herdr(["integration", "status"], 10_000, true).catch(() => ""));
   if (/^pi: current\b/m.test(status)) return;
   try {
+    mkdirSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), "extensions"), { recursive: true });
     await herdr(["integration", "install", "pi"], 30_000, true);
     notify("Installed herdr's pi integration; pi sessions started before this report no session path until restarted.");
   } catch (error) {
