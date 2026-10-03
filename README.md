@@ -4,7 +4,7 @@ A swarm of [pi](https://github.com/badlogic/pi-mono) agents inside [herdr](https
 
 ## Install
 
-Requires Node 22.19+, herdr 0.9+ and pi 0.99.2+ running inside herdr. Supervision depends on herdr's pi integration reporting each session's path; the extension installs it when missing (pi sessions started before that need a restart).
+Requires Node 22.19+, herdr >=0.9.0 on Linux/macOS (>=0.9.1 on Windows), and pi 0.99.2+ running inside herdr. Supervision depends on herdr's pi integration reporting each session's path; the extension installs it when missing (pi sessions started before that need a restart).
 
 ```sh
 pi install git:github.com/fyang93/pi-herdr-swarm
