@@ -1,21 +1,20 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, readdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, validateToolArguments } from "@earendil-works/pi-ai";
 import { setTimeout as sleep } from "node:timers/promises";
-import { DAY, boardPath, post, readBoard, formatNote, namePattern } from "../src/board.ts";
-import { deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
+import { checkMessage, validateName, namePattern, deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
 import { presets, loadout, snapshot } from "../src/presets.ts";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-test-"));
-const settings: { swarm?: { maxAgents?: unknown } } = {};
+const settings: { swarm?: { maxAgents?: unknown; autoEnableCodemode?: unknown }; defaultTools?: string[] } = {};
 const fake = resolve("test/fake-herdr.cjs");
 chmodSync(fake, 0o755);
 Object.assign(process.env, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1", HERDR_BIN_PATH: fake, FAKE_HERDR_DIR: dir });
@@ -46,63 +45,55 @@ async function harness() {
     sessionManager: manager,
     ui: { setWidget() {}, notify: (message: string) => notices.push(message) }, shutdown: () => { shutdowns++; },
   };
-  const activeTools = ["read", "swarm_spawn", "swarm_send", "swarm_list", "swarm_board"];
+  const activeTools = ["read", "swarm_spawn", "swarm_send", "swarm_list"];
   swarm({
     on: (name: string, fn: Function) => handlers.set(name, [...(handlers.get(name) || []), fn]),
     registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag() {},
-    getActiveTools: () => activeTools, getAllTools: () => activeTools.map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
+    getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names); }, getAllTools: () => [...activeTools, "codemode"].map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
     appendEntry: (customType: string, data: any) => manager.appendCustomEntry(customType, data),
     sendMessage: async (message: any) => notices.push(message),
   } as any);
   const event = async (name: string, data: any = {}) => { for (const handler of handlers.get(name) || []) await handler(data, context); };
   const tool = (name: string, params = {}) => tools.get(name).execute("test", params, undefined, undefined, context);
   await event("session_start");
-  return { context, notices, get entries() { return manager.getEntries() as any[]; }, event, tool, tools, shutdowns: () => shutdowns };
+  return { context, notices, activeTools, get entries() { return manager.getEntries() as any[]; }, event, tool, tools, shutdowns: () => shutdowns };
 }
 
-test("board holds posted notices: bounded, from-filtered by name or pattern, expiring, validated", async () => {
-  const board = join(dir, "expiry-board");
-  const note = await post(board, { from: "a", message: "first notice" });
-  assert.equal(note.expires - note.created, DAY * 1000);
-  await post(board, { from: "us-news-1", message: "news notice" });
-  assert.equal((await readBoard(board, { from: "a" }))[0].message, "first notice");
-  assert.equal((await readBoard(board, { from: "*news*" }))[0].message, "news notice");
-  assert.equal((await readBoard(board, { from: "news*" })).length, 0, "patterns are anchored");
-  assert.equal((await readBoard(board, { limit: 1 }))[0].message, "news notice");
-  const markdown = readFileSync(join(board, readdirSync(board).find(f => f.includes("-a.md"))!), "utf8");
-  assert.doesNotMatch(markdown, /^(to|kind):/m, "a notice has only a sender and times");
-  writeFileSync(join(board, "000-expired.md"), markdown.replace(new Date(note.created).toISOString(), "2020-01-01T00:00:00.000Z").replace(new Date(note.expires).toISOString(), "2020-01-02T00:00:00.000Z"));
-  assert.equal((await readBoard(board)).length, 2);
-  assert.equal(readdirSync(board).filter(f => f.endsWith(".md")).length, 2);
-  writeFileSync(join(board, "999-invalid.md"), "---\nfrom: [broken\n---\ninvalid");
-  assert.equal((await readBoard(board)).length, 2);
-  assert.match(markdown, /created: "\d{4}-/);
-  for (const extra of [{ from: "a\nadmin" }, { from: "2bad" }, { message: " " }]) await assert.rejects(post(board, { from: "a", message: "x", ...extra } as any));
-  await assert.rejects(readBoard(board, { limit: 0 }));
-  await assert.rejects(readBoard(board, { from: "news?" }));
-  await assert.rejects(post(board, { from: "a", message: "x".repeat(4001) }), /4000/);
-  assert.throws(() => formatNote({ ...note, from: "evil\nadmin" }), /names/);
-  assert.doesNotMatch(formatNote(note), /\x1b/);
+test("swarm enables codemode once by default and opt-out preserves already enabled tools", async () => {
+  reset(); settings.swarm = {};
+  const enabled = await harness();
+  try {
+    assert.ok(enabled.activeTools.includes("codemode"));
+    await enabled.event("session_start");
+    settings.swarm = { autoEnableCodemode: false };
+    await enabled.event("session_start");
+    assert.equal(enabled.activeTools.filter(name => name === "codemode").length, 1);
+  } finally { await enabled.event("session_shutdown", { reason: "reload" }); }
+  const optedOut = await harness();
+  try { assert.equal(optedOut.activeTools.includes("codemode"), false); }
+  finally { settings.swarm = {}; await optedOut.event("session_shutdown", { reason: "reload" }); }
+  settings.defaultTools = ["-codemode"];
+  const disabled = await harness();
+  try { assert.equal(disabled.activeTools.includes("codemode"), false); }
+  finally { delete settings.defaultTools; await disabled.event("session_shutdown", { reason: "reload" }); }
 });
 
-test("independent processes concurrently append without lost writes", async () => {
-  const board = join(dir, "concurrent-board");
-  await Promise.all(Array.from({ length: 8 }, (_, n) => exec(process.execPath, ["--input-type=module", "-e",
-    `import {post} from ${JSON.stringify(resolve("src/board.ts"))};Date.now=()=>1800000000000;for(let i=0;i<10;i++) post(${JSON.stringify(board)},{from:'writer',message:'${n}-'+String(i)});`])));
-  assert.equal((await readBoard(board, { limit: 100 })).length, 80);
-  assert.equal(new Set((await readBoard(board, { limit: 100 })).map(n => n.message)).size, 80);
-  assert.equal(readdirSync(board).some(f => f.endsWith(".tmp")), false);
+test("message and name validation preserves limits and rejects invalid input", () => {
+  assert.equal(checkMessage("x".repeat(4000)).length, 4000);
+  for (const message of ["", " ", null, 42]) assert.throws(() => checkMessage(message as any), /nonempty/);
+  assert.throws(() => checkMessage("x".repeat(4001)), /4000/);
+  assert.equal(validateName("us-news-1"), "us-news-1");
+  for (const name of ["a\nadmin", "2bad", "a".repeat(33)]) assert.throws(() => validateName(name), /names/);
 });
 
 test("deliver pushes without storing, returns three states/codes, and never retries", async () => {
-  const board = join(dir, "delivery-board");
   reset();
   const sent = await deliver({ from: "spawner", to: "peer", message: "a\nb" });
   assert.equal(sent.deliveries[0].status, "submitted");
   assert.deepEqual(calls().at(-1)?.slice(0, 3), ["agent", "prompt", "peer"]);
   assert.equal(calls().at(-1)![3], "[swarm message] spawner → peer\na\nb");
   assert.equal(calls().at(-1)!.length, 4, "native steer only, no urgent or receiver rerouting");
-  assert.equal((await readBoard(board)).length, 0, "pushed messages are not stored");
+  assert.equal(existsSync(join(dir, ".pi/swarm")), false, "delivery creates no shared storage");
   for (const [code, status] of [["agent_blocked", "rejected"], ["timeout", "unknown"], ["server_error", "unknown"]]) {
     reset({ promptError: code });
     const failed = await deliver({ from: "spawner", to: "peer", message: code });
@@ -241,67 +232,50 @@ test("optional presets snapshot only configuration, respect trust and override o
   delete process.env.PI_CODING_AGENT_DIR;
 });
 
-test("list/board reads do not name caller; board posts name with notification and reads stay capped", async () => {
-  reset({ agents: [{ pane_id: "w1:p1", agent: "pi" }] });
-  const board = boardPath(dir); const h = await harness();
+test("list does not name the caller; send names it once with a notification", async () => {
+  reset({ agents: [{ pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "peer", pane_id: "w1:p2", agent: "pi", cwd: dir }] });
+  const h = await harness();
   try {
-    await h.tool("swarm_list"); await h.tool("swarm_board");
+    assert.deepEqual([...h.tools.keys()], ["swarm_spawn", "swarm_send", "swarm_list"]);
+    await h.tool("swarm_list");
     assert.equal(calls().some(c => c[1] === "rename"), false);
-    const params = validateToolArguments(h.tools.get("swarm_board"), { type: "toolCall", id: "test", name: "swarm_board", arguments: { message: "board only", from: "someone-else", limit: 1 } });
-    const result = await h.tool("swarm_board", params);
-    assert.match(result.content[0].text, /posted · board only/);
-    assert.equal(result.isError, false);
-    assert.equal(result.details.board, board);
-    assert.equal(result.details.boardOnly, true);
-    assert.deepEqual(result.details.deliveries, []);
-    assert.equal(result.details.note.from, "swarm-w1-p1", "from cannot override the posting identity");
-    assert.equal(result.details.note.message, "board only");
-    assert.equal(result.details.note.expires - result.details.note.created, DAY * 1000);
-    assert.match(result.content[0].text, new RegExp(new Date(result.details.note.expires).toISOString()));
-    assert.equal(calls().some(c => c[1] === "prompt" || c[1] === "start"), false);
+    for (const to of ["peer", "*"]) {
+      const sent = await h.tool("swarm_send", { to, message: "announcement" });
+      assert.equal(sent.isError, false);
+      assert.deepEqual(sent.details.deliveries, [{ to: "peer", status: "submitted" }]);
+      assert.match(calls().filter(c => c[1] === "prompt").at(-1)![3], /\[swarm message\] swarm-w1-p1/);
+    }
+    assert.equal(calls().filter(c => c[1] === "rename").length, 1);
     assert.ok(h.notices.some(n => typeof n === "string" && n.includes("This session is now named swarm-w1-p1")));
-    assert.match((await h.tool("swarm_board", { from: "swarm-w1-p1" })).content[0].text, /board only/);
-    assert.equal((await h.tool("swarm_board", { from: "someone-else" })).details.notes.length, 0);
-    assert.equal((await h.tool("swarm_board", { from: "*w1*", limit: 1 })).details.notes.length, 1);
-    for (const message of ["", " ", "x".repeat(4001)]) await assert.rejects(h.tool("swarm_board", { message }), /nonempty|4000/);
-    assert.equal((await readBoard(board)).length, 1, "invalid messages never post or fall back to reading");
-    const maximum = await h.tool("swarm_board", { message: "x".repeat(4000) });
-    assert.equal(maximum.details.note.message.length, 4000);
-    assert.equal(calls().filter(c => c[1] === "rename").length, 1, "existing identity is preserved");
-    for (let i = 0; i < 30; i++) await post(board, { from: `sender-${i}`, message: "x".repeat(4000) });
-    const bounded = await h.tool("swarm_board"); assert.equal(bounded.details.notes.length, 20); assert.ok(bounded.content[0].text.length <= 30_000);
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
-test("board/send schemas validate posting and reading; send requires a recipient and never posts", async () => {
+test("send schema requires a recipient and bounded message; sending requires herdr", async () => {
   reset(); const h = await harness();
-  const validate = (name: string, args: any) => validateToolArguments(h.tools.get(name), { type: "toolCall", id: "test", name, arguments: args });
+  const validate = (args: any) => validateToolArguments(h.tools.get("swarm_send"), { type: "toolCall", id: "test", name: "swarm_send", arguments: args });
   try {
-    for (const args of [{}, { from: "peer*", limit: 100 }, { message: "notice" }]) assert.deepEqual(validate("swarm_board", args), args);
-    for (const args of [{ message: "" }, { message: "x".repeat(4001) }, { limit: 0 }, { limit: 101 }, { message: "notice", to: "peer" }]) assert.throws(() => validate("swarm_board", args), /Validation failed/);
-    await assert.rejects(h.tool("swarm_board", { limit: 1.5 }), /limit must be 1..100/);
-    assert.throws(() => validate("swarm_send", { message: "no recipient" }), /to/);
-    assert.throws(() => validate("swarm_send", { to: "", message: "empty recipient" }), /Validation failed/);
-    const before = await readBoard(boardPath(dir), { limit: 100 });
-    for (const to of ["peer", "*"]) {
-      const result = await h.tool("swarm_send", validate("swarm_send", { to, message: "push only" }));
-      assert.ok(result.details.deliveries.some((d: any) => d.to === "peer" && d.status === "submitted"));
-      assert.equal(result.details.note, undefined);
-      assert.equal(result.details.boardOnly, undefined);
-    }
-    assert.deepEqual(await readBoard(boardPath(dir), { limit: 100 }), before);
+    assert.throws(() => validate({ message: "no recipient" }), /to/);
+    for (const args of [{ to: "", message: "x" }, { to: "peer", message: "" }, { to: "peer", message: "x".repeat(4001) }, { to: "peer", message: "x", from: "impostor" }]) assert.throws(() => validate(args), /Validation failed/);
+    for (const message of ["", " ", "x".repeat(4001)]) await assert.rejects(h.tool("swarm_send", { to: "peer", message }), /nonempty|4000/);
+    const maximum = await h.tool("swarm_send", validate({ to: "peer", message: "x".repeat(4000) }));
+    assert.equal(maximum.isError, false);
     const env = process.env.HERDR_ENV;
     try {
       delete process.env.HERDR_ENV;
-      await h.tool("swarm_board");
-      await assert.rejects(h.tool("swarm_board", { message: "requires herdr" }), /inside a herdr pane/);
+      for (const tool of ["swarm_send", "swarm_spawn", "swarm_list"]) await assert.rejects(h.tool(tool, { to: "peer", message: "x", task: "x" }), /inside a herdr pane/);
     } finally { process.env.HERDR_ENV = env; }
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
-test("spawn inherits model but no tool restrictions; detach retains history without waiting", async () => {
+test("spawn inherits model and sends tasks verbatim; every run is supervised and resume requires an archived result", async () => {
   reset(); const h = await harness();
   try {
+    const description = h.tools.get("swarm_spawn").description;
+    assert.match(h.tools.get("swarm_send").description, /Call this tool directly, not as a shell command/);
+    assert.match(description, /stays running while its task runs, then exits/);
+    assert.throws(() => validateToolArguments(h.tools.get("swarm_spawn"), { type: "toolCall", id: "test", name: "swarm_spawn", arguments: { task: "x", detach: true } }), /Validation failed/);
+    assert.match(description, /Use swarm_send to communicate/);
+    assert.doesNotMatch(description, /meaningful changes|monitoring a state/);
     await assert.rejects(h.tool("swarm_spawn", { agent: "unknown", task: "x" }), /Unknown preset/);
     await h.tool("swarm_spawn", { name: "first", task: "ROLE_IN_TASK" });
     assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 1);
@@ -310,22 +284,30 @@ test("spawn inherits model but no tool restrictions; detach retains history with
     assert.equal(args.includes("--tools"), false);
     assert.equal(args.includes("--approve"), false);
     const other = join(dir, "nested");
-    await h.tool("swarm_spawn", { name: "detached", task: "TASK", cwd: other, detach: true });
-    assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 1);
+    await h.tool("swarm_spawn", { name: "second", task: "TASK", cwd: other });
+    assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 2);
     assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
-    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "ROLE_IN_TASK", "the task is sent verbatim");
+    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "ROLE_IN_TASK");
     assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "TASK");
     assert.equal(args[args.indexOf("--swarm-name") + 1], "first");
     assert.equal(h.entries.filter(e => e.customType === "swarm_spawn").length, 2);
     await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use resume explicitly/);
-    await assert.rejects(h.tool("swarm_spawn", { resume: "detached", name: "bad", task: "again" }), /resume accepts only/);
+    await assert.rejects(h.tool("swarm_spawn", { resume: "second", name: "bad", task: "again" }), /resume accepts only/);
     reset({ agents: [{ name: "spawner", agent: "pi", pane_id: "w1:p1", cwd: dir, agent_session: { kind: "path", value: "/other-session.jsonl" } }] });
     await assert.rejects(h.tool("swarm_spawn", { resume: "first", task: "again" }), /pending/);
     h.context.sessionManager.resetLeaf(); h.context.sessionManager.appendMessage(fauxAssistantMessage("different branch"));
     await assert.rejects(h.tool("swarm_spawn", { resume: "first", task: "again" }), /not archived/);
+    const second = h.entries.find(e => e.customType === "swarm_spawn" && e.data.name === "second");
+    const previous = SessionManager.open(second.data.session);
+    previous.appendMessage({ role: "user", content: "TASK", timestamp: Date.now() }); previous.appendMessage(fauxAssistantMessage("done"));
+    await assert.rejects(h.tool("swarm_spawn", { resume: "second", task: "Follow-up task" }), /not archived/);
+    h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: second.id });
+    await h.tool("swarm_spawn", { resume: "second", task: "Follow-up task" });
+    assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "Follow-up task");
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
+
 
 test("a missing herdr pi integration is installed once at session start", async () => {
   reset({ integration: "pi: not installed" }); const h = await harness();
@@ -343,36 +325,24 @@ test("the agent cap comes from pi settings swarm.maxAgents", async () => {
   reset(); const h = await harness();
   try {
     settings.swarm = { maxAgents: 1 };
-    await assert.rejects(h.tool("swarm_spawn", { task: "capped", detach: true }), /admission refused: \d+\/1 online/);
+    await assert.rejects(h.tool("swarm_spawn", { task: "capped" }), /admission refused: \d+\/1 online/);
     settings.swarm = { maxAgents: 0 };
-    await assert.rejects(h.tool("swarm_spawn", { task: "invalid", detach: true }), /swarm.maxAgents must be a positive integer/);
+    await assert.rejects(h.tool("swarm_spawn", { task: "invalid" }), /swarm.maxAgents must be a positive integer/);
   } finally { delete settings.swarm; await h.event("session_shutdown", { reason: "reload" }); }
 });
 
-test("auto names skip senders still on the retained board", async () => {
-  reset(); const h = await harness();
+test("auto names skip live agents and this session's spawn history", async () => {
+  const agents = [{ name: "spawner", pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "peer-1", pane_id: "w1:p2", agent: "pi", cwd: dir }];
+  reset({ agents }); const h = await harness();
   try {
-    await post(boardPath(dir), { from: "peer-1", message: "a peer-1 from another session" });
-    await h.tool("swarm_spawn", { task: "AUTO", detach: true });
-    const start = calls().filter(c => c[1] === "start").at(-1)!;
-    assert.equal(start[start.indexOf("--swarm-name") + 1], "peer-2");
+    await h.tool("swarm_spawn", { task: "AUTO" });
+    let args = calls().filter(c => c[1] === "start").at(-1)!;
+    assert.equal(args[args.indexOf("--swarm-name") + 1], "peer-2");
+    reset({ agents });
+    await h.tool("swarm_spawn", { task: "NEXT" });
+    args = calls().filter(c => c[1] === "start").at(-1)!;
+    assert.equal(args[args.indexOf("--swarm-name") + 1], "peer-3");
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
-});
-
-test("board reads are descriptor-bounded, reclaim expired notices, and do not report I/O errors as empty", async () => {
-  const board = join(dir, "bounded-board");
-  const note = await post(board, { from: "a", message: "old" });
-  const file = join(board, readdirSync(board)[0]);
-  writeFileSync(file, readFileSync(file, "utf8").replace(new Date(note.created).toISOString(), "2020-01-01T00:00:00.000Z").replace(new Date(note.expires).toISOString(), "2020-01-02T00:00:00.000Z"));
-  await post(board, { from: "b", message: "new" });
-  assert.equal(readdirSync(board).includes(basename(file)), false, "posting reclaims expired notices");
-  const big = join(board, "999-large.md"); const directory = join(board, "999-directory.md");
-  writeFileSync(big, "x".repeat(64 * 1024 + 1)); mkdirSync(directory);
-  if (process.platform !== "win32") await exec("mkfifo", [join(board, "999-pipe.md")]);
-  const skipped: string[] = [];
-  assert.deepEqual((await readBoard(board, {}, path => skipped.push(path))).map(n => n.message), ["new"]);
-  assert.ok(skipped.some(s => s.includes(big))); assert.ok(skipped.some(s => s.includes(directory)));
-  await assert.rejects(readBoard(big), /ENOTDIR/);
 });
 
 test("startup admission includes unnamed agents and refuses uncertain counts before starting; blocked startup keeps a durable record", async () => {

@@ -17,7 +17,7 @@ async function runtime() {
  manager.appendMessage({role:'user',content:'initial',timestamp:Date.now()});manager.appendMessage(fauxAssistantMessage('initial'));
  const peer=SessionManager.create(cwd,mkdtempSync(join(dir,'peer-')));peer.appendMessage({role:'user',content:'task',timestamp:Date.now()});peer.appendMessage(fauxAssistantMessage('peer final'));
  const base=manager.getLeafId()!;
- manager.appendCustomEntry('swarm_spawn',{name:'peer',pane:'w1:p9',session:peer.getSessionFile(),boundary:null,detach:false,snapshot:{cwd,model:'review/test',thinking:'off'}});
+ manager.appendCustomEntry('swarm_spawn',{name:'peer',pane:'w1:p9',session:peer.getSessionFile(),boundary:null,snapshot:{cwd,model:'review/test',thinking:'off'}});
  const id=manager.getLeafId()!;
  const live={name:'peer',agent:'pi',agent_status:'working',pane_id:'w1:p9',cwd,agent_session:{kind:'path',value:peer.getSessionFile()}};state([live]);
  const faux=fauxProvider({provider:'review',models:[{id:'test',reasoning:false}]});

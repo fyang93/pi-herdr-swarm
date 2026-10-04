@@ -1,7 +1,7 @@
 {
   "name": "pi-herdr-swarm",
   "version": "0.1.0",
-  "description": "Named peer agents and an expiring shared board for pi and herdr",
+  "description": "Named peer agents and messaging for pi and herdr",
   "type": "module",
   "license": "MIT",
   "keywords": ["pi-package"],

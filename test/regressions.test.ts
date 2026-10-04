@@ -4,12 +4,11 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
-import { boardPath } from "../src/board.ts";
-import { readSession, readResult, lastReply, pendingRuns, type Run } from "../src/run.ts";
+import { readSession, readResult, lastReply, wasAborted, pendingRuns, type Run } from "../src/run.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-runtime-"));
 Object.assign(process.env, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1", HERDR_BIN_PATH: resolve("test/fake-herdr.cjs"), FAKE_HERDR_DIR: dir });
@@ -33,7 +32,7 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
   const errors: string[] = []; const notices: string[] = [];
   await session.bindExtensions({ mode: "tui", shutdownHandler: () => { shutdowns++; }, onError: e => errors.push(e.error),
     uiContext: { setWidget: (_key: string, factory: any) => { widget = factory; }, setStatus() {}, getEditorText: () => editor, notify: (message: string) => notices.push(message), onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
-  return { session, faux, board: boardPath(cwd), errors, notices, draft: (text: string) => { editor = text; }, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
+  return { session, faux, errors, notices, draft: (text: string) => { editor = text; }, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
     waiting: () => widget ? widget(undefined, { fg: (_c: string, text: string) => text }).render(200)[0] : "",
     close: async () => { await session.extensionRunner!.emit({ type: "session_shutdown", reason: "reload" }); session.dispose(); } };
 }
@@ -43,21 +42,51 @@ function spawnerSession() { const cwd = mkdtempSync(join(dir, "spawner-")); cons
 function peerRun(name: string, spawner: SessionManager): Run {
   const m = SessionManager.create(spawner.getCwd(), mkdtempSync(join(dir, "peer-")));
   m.appendMessage({ role: "user", content: "task", timestamp: Date.now() }); m.appendMessage(fauxAssistantMessage(`${name} final`));
-  const run: Run = { name, session: m.getSessionFile()!, pane: "w1:p9", boundary: null, detach: false, snapshot: { cwd: spawner.getCwd(), model: "swarm-test/test-model", thinking: "off" } };
+  const run: Run = { name, session: m.getSessionFile()!, pane: "w1:p9", boundary: null, snapshot: { cwd: spawner.getCwd(), model: "swarm-test/test-model", thinking: "off" } };
   spawner.appendCustomEntry("swarm_spawn", run); return run;
 }
 const live = (run: Run, status = "working", name: string | undefined = run.name) => ({ name, pane_id: "w1:p19", agent: "pi", agent_status: status, agent_session: { kind: "path", value: run.session } });
 
-test("exit: settled completion shuts down without touching the board; manual, error and interrupted outcomes", async () => {
+test("exit: settled completion shuts down; manual, error and interrupted outcomes", async () => {
   for (const [auto, reply, expected] of [[false, fauxAssistantMessage("manual"), 0], [true, fauxAssistantMessage("final reply"), 1], [true, fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider unavailable" }), 1], [true, fauxAssistantMessage("stopped", { stopReason: "aborted" }), 0]] as const) {
     state(); const r = await runtime(auto);
     try {
       assert.equal(r.session.thinkingLevel, "off"); assert.ok(r.session.getActiveToolNames().includes("swarm_spawn"));
       r.faux.setResponses([reply]); await r.session.prompt("task"); await sleep(20); assert.equal(r.shutdowns(), expected);
-      assert.equal(existsSync(r.board), false, "results live in the session, not on the board");
+      assert.equal(existsSync(join(r.session.sessionManager.getCwd(), ".pi/swarm")), false, "completion creates no shared storage");
       assert.equal(readFileSync(join(dir, "calls.jsonl"), "utf8"), ""); assert.deepEqual(r.errors, []);
     } finally { await r.close(); }
   }
+});
+
+test("a real codemode monitor sends changes while keeping the peer alive until stopped", async () => {
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const r = await runtime(true, pi => { createCodemodeExtension()(pi); pi.on("tool_execution_start", event => { if (event.toolName === "bash") entered(); }); });
+  const cwd = r.session.sessionManager.getCwd(); const stop = join(cwd, "stop"); const status = join(cwd, "status");
+  state([{ name: "worker", pane_id: "w1:p1", agent: "pi", cwd }, { name: "spawner", pane_id: "w1:p2", agent: "pi", cwd }]);
+  writeFileSync(status, "ready");
+  const script = `let previous = "ready"; while (true) {
+    const sample = await tools.bash({command: ${JSON.stringify(`sleep 0.05; if [ -f '${stop}' ]; then echo STOP; else cat '${status}'; fi`)}});
+    const current = sample.output.trim(); if (current === "STOP") break;
+    if (current !== previous) { await tools.swarm_send({to: "spawner", message: current}); previous = current; }
+  } text("monitoring stopped");`;
+  r.faux.setResponses([fauxAssistantMessage(fauxToolCall("codemode", { code: script })), fauxAssistantMessage("monitoring stopped")]);
+  const task = r.session.prompt("monitor until stopped");
+  try {
+    assert.ok(r.session.getActiveToolNames().includes("codemode"));
+    await Promise.race([started, task.then(() => { throw new Error("codemode ended before monitoring started"); })]);
+    for (const change of ["degraded", "recovered"]) {
+      writeFileSync(status, change);
+      const notified = () => readFileSync(join(dir, "calls.jsonl"), "utf8").includes(`\\n${change}`);
+      for (let n = 0; n < 100 && !notified(); n++) await sleep(10);
+      assert.ok(notified()); assert.equal(r.session.isIdle, false); assert.equal(r.shutdowns(), 0);
+    }
+    await sleep(100);
+    assert.equal(readFileSync(join(dir, "calls.jsonl"), "utf8").split("\n").filter(line => line.includes('"prompt"')).length, 2, "unchanged state sends no repeat");
+    writeFileSync(stop, "stop"); await task; await sleep(20);
+    assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
+  } finally { writeFileSync(stop, "stop"); await task; await r.close(); }
 });
 
 test("user cancellation: actual deferred-settle input, before_settle Escape and editor draft invalidate exit", async () => {
@@ -116,16 +145,35 @@ test("session supervision: lost names and same-name replacement do not hide the 
   finally { await restored.close(); }
 });
 
+test("busy result reaches the next tool boundary without a finished notice", async () => {
+  const spawner = spawnerSession(); const run = peerRun("peer", spawner); state([live(run)]);
+  const r = await runtime(false, undefined, spawner);
+  let release!: () => void; let entered!: () => void; let nextContext = "";
+  const hold = new Promise<void>(resolve => { release = resolve; }); const started = new Promise<void>(resolve => { entered = resolve; });
+  try {
+    r.faux.setResponses([async () => { entered(); await hold; return fauxAssistantMessage(fauxToolCall("swarm_list", {})); },
+      context => { nextContext = JSON.stringify(context); return fauxAssistantMessage("processed"); }]);
+    const busy = r.session.prompt("busy"); await started; state(); await sleep(1200);
+    assert.equal(count(), 1); assert.equal(r.waiting(), "");
+    release(); await busy;
+    assert.match(nextContext, /\[swarm result\]/); assert.match(nextContext, /peer final/);
+    assert.equal(results(spawner).length, 1); assert.equal(count(), 0);
+    assert.equal(spawner.getEntries().some(e => e.type === "custom_message" && e.customType === "swarm_notice"), false);
+    assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
 test("user cancellation: busy result survives Escape once and remains pending until a subsequent completed reply", async () => {
   const spawner = spawnerSession(); const run = peerRun("peer", spawner); state([live(run)]);
   const r = await runtime(true, undefined, spawner);
   try {
     r.faux.setResponses([async (_c, options) => { await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true })); return fauxAssistantMessage("interrupted"); }, fauxAssistantMessage("continued")]);
     const busy = r.session.prompt("busy"); await sleep(20); state(); await sleep(1200);
-    assert.equal(count(), 1); assert.equal(r.waiting(), ""); // finished: no longer shown as waiting, though not yet read
+    assert.equal(count(), 1); assert.equal(r.waiting(), ""); // the result is queued, not yet processed
     r.type("\x1b"); r.session.clearQueue(); await r.session.abort(); await busy;
     assert.equal(r.shutdowns(), 0); assert.equal(results(spawner).length, 1); assert.equal(count(), 1);
     await r.session.prompt("continue"); await sleep(20); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1); assert.equal(results(spawner).length, 1);
+    assert.deepEqual(r.errors, []);
   } finally { await r.close(); }
 });
 
@@ -137,8 +185,181 @@ test("result and exit: a slow settled handler spans several polls; one result, n
   const r = await runtime(true, pi => { pi.on("agent_settled", async () => { if (once) { once = false; entered(); await hold; } else atSettled = count(); }); }, spawner);
   try {
     r.faux.setResponses([fauxAssistantMessage("old candidate"), fauxAssistantMessage("fresh response")]); const task = r.session.prompt("wait"); await started; state(); await sleep(3300);
-    assert.equal(results(spawner).length, 1); assert.equal(count(), 1); assert.equal(r.shutdowns(), 0);
+    assert.equal(results(spawner).length, 0); assert.equal(count(), 1); assert.equal(r.shutdowns(), 0);
     release(); await task; await sleep(30); assert.equal(results(spawner).length, 1); assert.equal(atSettled, 0); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1);
+  } finally { release(); await r.close(); }
+});
+
+test("restoring the steering queue without aborting cannot lose a peer result", async () => {
+  const spawner = spawnerSession(); const run = peerRun("peer", spawner); state([live(run)]);
+  const r = await runtime(false, undefined, spawner);
+  let release!: () => void; let entered!: () => void; let nextContext = "";
+  const hold = new Promise<void>(resolve => { release = resolve; }); const started = new Promise<void>(resolve => { entered = resolve; });
+  try {
+    r.faux.setResponses([async () => { entered(); await hold; return fauxAssistantMessage("current task finished"); },
+      context => { nextContext = JSON.stringify(context); return fauxAssistantMessage("processed"); }]);
+    const task = r.session.prompt("busy"); await started; state(); await sleep(1200);
+    r.session.clearQueue(); // Alt+Up restores the queues without aborting the current request.
+    release(); await task;
+    assert.equal(results(spawner).length, 1); assert.match(nextContext, /peer final/);
+    assert.equal(count(), 0); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+test("Escape during a slow before-settle preserves a late result without waking the cancelled task", async () => {
+  const spawner = spawnerSession(); const run = peerRun("peer", spawner); state([live(run)]);
+  let release!: () => void; let entered!: () => void; let once = true;
+  const hold = new Promise<void>(resolve => { release = resolve; }); const started = new Promise<void>(resolve => { entered = resolve; });
+  const r = await runtime(true, pi => { pi.on("agent_before_settle", async () => { if (once) { once = false; entered(); await hold; } }); }, spawner);
+  try {
+    r.faux.setResponses([fauxAssistantMessage("current task finished"), fauxAssistantMessage("processed")]);
+    const task = r.session.prompt("busy"); await started; state(); await sleep(1200);
+    r.type("\x1b"); r.session.clearQueue(); const abort = r.session.abort(); release(); await Promise.all([task, abort]);
+    assert.equal(results(spawner).length, 1); assert.equal(count(), 1); assert.equal(r.shutdowns(), 0);
+    await r.session.prompt("continue"); await sleep(20);
+    assert.equal(results(spawner).length, 1); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+test("two completed peers survive a provider error and recovery without duplicate results", async () => {
+  const spawner = spawnerSession(); const first = peerRun("first", spawner); const second = peerRun("second", spawner); state([live(first), { ...live(second), pane_id: "w1:p20" }]);
+  const r = await runtime(false, undefined, spawner);
+  let release!: () => void; let entered!: () => void; let nextContext = "";
+  const hold = new Promise<void>(resolve => { release = resolve; }); const started = new Promise<void>(resolve => { entered = resolve; });
+  try {
+    r.faux.setResponses([async () => { entered(); await hold; return fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider unavailable" }); },
+      context => { nextContext = JSON.stringify(context); return fauxAssistantMessage("recovered"); }]);
+    const task = r.session.prompt("busy"); await started; state(); await sleep(1200); release(); await task;
+    assert.equal(results(spawner).length, 2); assert.equal(count(), 2);
+    await r.session.prompt("continue");
+    assert.equal(results(spawner).length, 2); assert.equal(new Set(results(spawner).map(e => (e as any).details.spawnEntryId)).size, 2);
+    assert.match(nextContext, /first final/); assert.match(nextContext, /second final/); assert.equal(count(), 0); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+test("late settled results are delivered as one batch with one follow-up reply", async () => {
+  const spawner = spawnerSession(); const first = peerRun("first", spawner); const second = peerRun("second", spawner); state([live(first), { ...live(second), pane_id: "w1:p20" }]);
+  let entered!: () => void; let release!: () => void; let once = true; let nextContext = "";
+  const started = new Promise<void>(resolve => { entered = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
+  const r = await runtime(false, pi => { pi.on("agent_before_settle", async () => { if (once) { once = false; entered(); await hold; } }); }, spawner);
+  try {
+    r.faux.setResponses([fauxAssistantMessage("current task finished"), context => { nextContext = JSON.stringify(context); return fauxAssistantMessage("processed batch"); }, fauxAssistantMessage("unexpected extra reply")]);
+    const task = r.session.prompt("busy"); await started; state(); await sleep(1200); release(); await task;
+    assert.equal(results(spawner).length, 2); assert.equal(r.faux.state.callCount, 2);
+    assert.match(nextContext, /first final/); assert.match(nextContext, /second final/); assert.equal(count(), 0); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+for (const navigate of [false, true]) test(navigate ? "Escape plus tree navigation cannot restart a deferred result wake" : "Escape after a deferred result wake prevents replies and side effects, but not the next user task", async () => {
+  const spawner = spawnerSession(); spawner.appendMessage(fauxAssistantMessage("before delegation")); const beforeDelegation = spawner.getLeafId()!;
+  const run = peerRun("peer", spawner); state([live(run)]);
+  let before!: () => void; let settle!: () => void; let releaseBefore!: () => void; let releaseSettled!: () => void; let firstBefore = true; let firstSettled = true;
+  const beforeStarted = new Promise<void>(resolve => { before = resolve; }); const settledStarted = new Promise<void>(resolve => { settle = resolve; });
+  const beforeHold = new Promise<void>(resolve => { releaseBefore = resolve; }); const settledHold = new Promise<void>(resolve => { releaseSettled = resolve; });
+  const r = await runtime(true, pi => {
+    pi.on("agent_before_settle", async () => { if (firstBefore) { firstBefore = false; before(); await beforeHold; } });
+    pi.on("agent_settled", async () => { if (firstSettled) { firstSettled = false; settle(); await settledHold; } });
+  }, spawner);
+  const sideEffect = join(spawner.getCwd(), "unwanted-write"); let wakeAborted = false;
+  try {
+    r.faux.setResponses([fauxAssistantMessage("current task finished"), (_context, options) => {
+      wakeAborted = options?.signal?.aborted === true;
+      return fauxAssistantMessage(fauxToolCall("write", { path: sideEffect, content: "should not run" }));
+    }, fauxAssistantMessage("processed by user request")]);
+    const task = r.session.prompt("busy"); await beforeStarted; state(); await sleep(1200); releaseBefore(); await settledStarted;
+    r.type("\x1b"); r.session.clearQueue(); const abort = r.session.abort();
+    if (navigate) await r.session.navigateTree(beforeDelegation, { summarize: false });
+    releaseSettled(); await Promise.all([task, abort]);
+    assert.ok(r.faux.state.callCount === 1 || wakeAborted, "the cancelled wake must not reach a provider with a live signal"); assert.equal(existsSync(sideEffect), false);
+    assert.ok(wasAborted(lastReply(spawner, null))); assert.equal(results(spawner).length, 1); assert.equal(count(), navigate ? 0 : 1); assert.equal(r.shutdowns(), 0);
+    r.faux.setResponses([fauxAssistantMessage("processed by user request")]);
+    await r.session.prompt("continue"); await sleep(20);
+    assert.equal(lastReply(spawner, null)?.stopReason, "stop"); assert.equal(results(spawner).length, 1); assert.equal(count(), 0); assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
+  } finally { releaseBefore(); releaseSettled(); await r.close(); }
+});
+
+for (const interrupt of [false, true]) test(interrupt ? "idle reload cannot clear cancellation of a deferred result wake" : "idle reload during a deferred result wake preserves one handoff and one archive", async () => {
+  const spawner = spawnerSession(); const run = peerRun("peer", spawner); state([live(run)]);
+  let before!: () => void; let settle!: () => void; let releaseBefore!: () => void; let releaseSettled!: () => void; let firstBefore = true; let firstSettled = true;
+  const beforeStarted = new Promise<void>(resolve => { before = resolve; }); const settledStarted = new Promise<void>(resolve => { settle = resolve; });
+  const beforeHold = new Promise<void>(resolve => { releaseBefore = resolve; }); const settledHold = new Promise<void>(resolve => { releaseSettled = resolve; });
+  const r = await runtime(false, pi => {
+    pi.on("agent_before_settle", async () => { if (firstBefore) { firstBefore = false; before(); await beforeHold; } });
+    pi.on("agent_settled", async () => { if (firstSettled) { firstSettled = false; settle(); await settledHold; } });
+  }, spawner);
+  try {
+    r.faux.setResponses([fauxAssistantMessage("current task finished"), fauxAssistantMessage("processed result"), fauxAssistantMessage("unexpected duplicate reply")]);
+    const task = r.session.prompt("busy"); await beforeStarted; state(); await sleep(1200); releaseBefore(); await settledStarted;
+    assert.equal(r.session.isIdle, true);
+    if (interrupt) { r.type("\x1b"); await r.session.abort(); }
+    await r.session.reload(); await sleep(1250); releaseSettled(); await task;
+    assert.equal(results(spawner).length, 1); assert.equal(r.faux.state.callCount, interrupt ? 1 : 2);
+    assert.equal(count(), interrupt ? 1 : 0); assert.deepEqual(r.errors, []);
+    if (interrupt) {
+      assert.ok(wasAborted(lastReply(spawner, null)));
+      r.faux.setResponses([fauxAssistantMessage("processed by user request")]); await r.session.prompt("continue"); assert.equal(count(), 0);
+    }
+  } finally { releaseBefore(); releaseSettled(); await r.close(); }
+});
+
+test("manual compaction retains a collected result and idle polling delivers it even if herdr then fails", async () => {
+  const spawner = spawnerSession();
+  for (let n = 0; n < 5; n++) {
+    spawner.appendMessage({ role: "user", content: "old task ".repeat(3000), timestamp: Date.now() });
+    spawner.appendMessage(fauxAssistantMessage("old reply ".repeat(3000)));
+  }
+  const run = peerRun("peer", spawner); state([live(run)]);
+  let entered!: () => void; let release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
+  const r = await runtime(false, pi => { pi.on("session_before_compact", async event => {
+    entered(); await hold;
+    return { compaction: { summary: "old tasks summarized", firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore } };
+  }); }, spawner);
+  try {
+    r.faux.setResponses([fauxAssistantMessage("processed")]);
+    const compact = r.session.compact(); await started; assert.equal(r.session.isIdle, false);
+    state(); await sleep(1200); assert.equal(results(spawner).length, 0);
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ agents: [], listError: true }));
+    release(); await compact; await sleep(1250); await r.session.waitForIdle();
+    assert.equal(results(spawner).length, 1); assert.equal(count(), 0); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+test("tree summary does not deliver a cached result into an abandoned branch", async () => {
+  const spawner = spawnerSession(); spawner.appendMessage(fauxAssistantMessage("before delegation")); const before = spawner.getLeafId()!;
+  spawner.appendMessage({ role: "user", content: "old branch task", timestamp: Date.now() }); spawner.appendMessage(fauxAssistantMessage("old branch reply"));
+  const run = peerRun("peer", spawner); const spawn = spawner.getLeafId()!; state([live(run)]);
+  const r = await runtime(false, undefined, spawner);
+  let entered!: () => void; let release!: () => void; let nextContext = "";
+  const started = new Promise<void>(resolve => { entered = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
+  try {
+    r.faux.setResponses([async () => { entered(); await hold; return fauxAssistantMessage("old branch summarized"); },
+      context => { nextContext = JSON.stringify(context); return fauxAssistantMessage("new branch reply"); }, fauxAssistantMessage("processed peer result")]);
+    const navigation = r.session.navigateTree(before, { summarize: true }); await started; assert.equal(r.session.isIdle, false);
+    state(); await sleep(1200); release(); await navigation; await sleep(1250);
+    assert.equal(results(spawner).length, 0); assert.equal(count(), 0);
+    await r.session.prompt("continue on new branch"); assert.doesNotMatch(nextContext, /peer final/);
+    await r.session.navigateTree(spawn, { summarize: false }); await sleep(1250); await r.session.waitForIdle();
+    assert.equal(results(spawner).length, 1); assert.equal(count(), 0); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+test("a replaced boundary draft is proposed again without dropping another extension's entries", async () => {
+  const spawner = spawnerSession(); const run = peerRun("peer", spawner); state([live(run)]);
+  let release!: () => void; let entered!: () => void; let once = true; let nextContext = "";
+  const hold = new Promise<void>(resolve => { release = resolve; }); const started = new Promise<void>(resolve => { entered = resolve; });
+  const r = await runtime(false, pi => { pi.on("turn_end", event => {
+    if (once && event.entries.some(entry => entry.type === "custom_message" && entry.customType === "swarm_result")) {
+      once = false;
+      return { entries: [{ type: "custom_message", customType: "other", content: "another extension's entry", display: true }], continue: false };
+    }
+  }); }, spawner);
+  try {
+    r.faux.setResponses([async () => { entered(); await hold; return fauxAssistantMessage("current task finished"); },
+      context => { nextContext = JSON.stringify(context); return fauxAssistantMessage("processed"); }]);
+    const task = r.session.prompt("busy"); await started; state(); await sleep(1200); release(); await task;
+    assert.equal(results(spawner).length, 1); assert.match(nextContext, /peer final/); assert.match(nextContext, /another extension's entry/);
+    assert.equal(count(), 0); assert.deepEqual(r.errors, []);
   } finally { release(); await r.close(); }
 });
 

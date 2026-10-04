@@ -1,14 +1,14 @@
-import { SessionManager, parseSessionEntries, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, parseSessionEntries, type ExtensionAPI, type ExtensionContext, type TurnEndEvent, type AgentBeforeSettleEvent } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { list, sessionBinding, sessionPath, type LiveAgent } from "./herdr.ts";
-import { MESSAGE_LIMIT } from "./board.ts";
+import { MESSAGE_LIMIT, list, sessionBinding, sessionPath, type LiveAgent } from "./herdr.ts";
 import type { Snapshot } from "./presets.ts";
 import { waitingView } from "./ui.ts";
 
-export interface Run { name: string; pane: string; session: string; boundary: string | null; snapshot: Snapshot; detach: boolean }
+export interface Run { name: string; pane: string; session: string; boundary: string | null; snapshot: Snapshot }
 export const PENDING_COUNT_KEY = Symbol.for("pi-herdr-swarm/pending-count");
+const DELIVERY_KEY = Symbol.for("pi-herdr-swarm/result-delivery");
 
 /** Read-only: SessionManager.open would repair or migrate the file. */
 export function readSession(file: string): SessionManager {
@@ -56,7 +56,7 @@ const resultId = (entry: any): string | undefined =>
   entry.type === "custom_message" && entry.customType === "swarm_result" ? entry.details?.spawnEntryId : undefined;
 
 /**
- * Non-detached runs on the active branch whose result is not archived anywhere in the session (a result is
+ * Runs on the active branch whose result is not archived anywhere in the session (a result is
  * archived once, whichever branch the user is on). With `processed`, a run whose result is on the active
  * branch also stays pending until a completed assistant reply follows it: the host must not exit before
  * reading it. A result left on another branch counts as handled: the user navigated away from it.
@@ -67,7 +67,7 @@ export function pendingRuns(manager: Pick<SessionManager, "getBranch" | "getEntr
   const archivedAt = new Map<string, number>();
   let lastCompleted = -1;
   manager.getBranch().forEach((entry, index) => {
-    if (entry.type === "custom" && entry.customType === "swarm_spawn" && !(entry.data as Run).detach) runs.set(entry.id, entry.data as Run);
+    if (entry.type === "custom" && entry.customType === "swarm_spawn") runs.set(entry.id, entry.data as Run);
     const id = resultId(entry);
     if (id && runs.has(id)) archivedAt.set(id, index);
     if (entry.type === "message" && entry.message.role === "assistant" && ["stop", "length"].includes(entry.message.stopReason)) lastCompleted = index;
@@ -89,20 +89,19 @@ export function lifecycle(pi: ExtensionAPI) {
   let polling = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let stopWatchingKeys: (() => void) | undefined;
-  // Exit state: a completion candidate from the last settled turn, and whether the user cancelled this turn.
+  // Exit state: a completion candidate from the last settled turn.
   let outcome: string | undefined;
   let candidate = false;
-  let cancelled = false;
   let exitTick: ReturnType<typeof setTimeout> | undefined;
   let finished = false;
   // Process-local supervision state; everything durable is derived from the session.
   const launching = new Set<string>();
-  const written = new Set<string>();
+  // A message awaits a safe boundary; undefined means it has already been submitted to pi.
+  let delivery = { written: new Map<string, ReturnType<typeof resultMessage> | undefined>(), cancelled: false };
   const blocked = new Set<string>();
 
   const pending = () => pendingRuns(ctx!.sessionManager);
   const pendingCount = () => ctx ? pendingRuns(ctx.sessionManager, true).size : 0;
-  const notice = (content: string) => pi.sendMessage({ customType: "swarm_notice", content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
 
   /** Launched by swarm with these flags, and still on the session it was launched with. */
   function eligible(context: ExtensionContext): boolean {
@@ -119,8 +118,8 @@ export function lifecycle(pi: ExtensionAPI) {
 
   function widget() {
     if (ctx?.mode !== "tui") return;
-    // Only peers still running: a finished peer's result is read (and queued while a turn runs), even if not yet answered.
-    const waiting = [...pending()].filter(([id]) => !written.has(id));
+    // Only peers still running: collected results await a safe boundary, even if not yet answered.
+    const waiting = [...pending()].filter(([id]) => !delivery.written.has(id));
     const statuses = new Map(waiting.filter(([id]) => blocked.has(id)).map(([, run]) => [run.name, "blocked"]));
     ctx.ui.setWidget("swarm", waiting.length ? (_tui, theme) => waitingView(waiting.map(([, run]) => run.name), statuses, theme) : undefined);
   }
@@ -132,11 +131,11 @@ export function lifecycle(pi: ExtensionAPI) {
   }
 
   function scheduleExit() {
-    if (!active || finished || cancelled || !candidate || exitTick || !eligible(ctx!)) return;
+    if (!active || finished || delivery.cancelled || !candidate || exitTick || !eligible(ctx!)) return;
     const context = ctx!;
     exitTick = setTimeout(() => {
       exitTick = undefined;
-      if (!active || ctx !== context || cancelled || !candidate || !eligible(context)) return;
+      if (!active || ctx !== context || delivery.cancelled || !candidate || !eligible(context)) return;
       if (!context.isIdle() || context.hasPendingMessages() || context.ui.getEditorText() || pendingCount()) return;
       candidate = false;
       const boundary = flag("boundary");
@@ -148,20 +147,47 @@ export function lifecycle(pi: ExtensionAPI) {
     }, 0);
   }
 
-  function archive(id: string, run: Run) {
+  function resultMessage(id: string, run: Run) {
     const result = readResult(run);
-    written.add(id);
+    return { customType: "swarm_result", content: `[swarm result] ${run.name}\nSession: ${run.session}\n${result.text}`, display: true,
+      details: { name: run.name, session: run.session, spawnEntryId: id, status: result.status } };
+  }
+
+  function archive(id: string, run: Run) {
+    delivery.written.set(id, resultMessage(id, run));
     cancelExit();
-    pi.sendMessage({ customType: "swarm_result", content: `[swarm result] ${run.name}\nSession: ${run.session}\n${result.text}`, display: true,
-      details: { name: run.name, session: run.session, spawnEntryId: id, status: result.status } }, { triggerTurn: false });
-    notice(`${run.name} finished`);
+  }
+
+  function readyResults() {
+    return [...pending()].flatMap(([id]) => {
+      const message = delivery.written.get(id);
+      return message ? [{ type: "custom_message" as const, ...message }] : [];
+    });
+  }
+
+  function flushResults(triggerTurn: boolean) {
+    const entries = readyResults();
+    const current = ctx!;
+    for (const [index, { type: _type, ...message }] of entries.entries()) {
+      if (!active || ctx !== current || !current.isIdle()) break;
+      delivery.written.set(message.details.spawnEntryId, undefined);
+      pi.sendMessage(message, { triggerTurn: triggerTurn && index === entries.length - 1 });
+    }
+  }
+
+  function resultBoundary(event: TurnEndEvent | AgentBeforeSettleEvent) {
+    const proposed = new Set(event.entries.map(resultId));
+    const entries = readyResults().filter(entry => !proposed.has(entry.details.spawnEntryId));
+    if (!entries.length) return;
+    // Keep payloads until pi persists them: later handlers can replace these drafts.
+    return { entries: [...event.entries, ...entries], ...(event.outcome === "completed" && !delivery.cancelled ? { continue: true } : {}) };
   }
 
   function supervise(id: string, run: Run, agents: LiveAgent[]) {
     const agent = sessionBinding(agents, run.session); // throws while bindings are uncertain: keep waiting
     if (!agent) return archive(id, run);
     if (agent.agent_status !== "blocked") return void blocked.delete(id);
-    if (!blocked.has(id)) notice(`${run.name} is blocked in pane ${agent.pane_id}.`);
+    if (!blocked.has(id)) pi.sendMessage({ customType: "swarm_notice", content: `${run.name} is blocked in pane ${agent.pane_id}.`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
     blocked.add(id);
   }
 
@@ -175,14 +201,20 @@ export function lifecycle(pi: ExtensionAPI) {
       // Read the session after listing: navigation while list was in flight must not archive an abandoned run.
       let unknown: string | undefined;
       for (const [id, run] of pending()) {
-        if (written.has(id) || launching.has(id)) continue;
+        if (delivery.written.has(id) || launching.has(id)) continue;
         try { supervise(id, run, agents); } catch (error) { unknown = `${run.name}: ${String(error)}`; }
       }
       status(unknown);
-      widget();
-      scheduleExit();
     } catch (error) { if (active && ctx === current) status(pending().size ? `herdr list: ${String(error)}` : undefined); }
-    finally { polling = false; }
+    finally {
+      if (active && ctx === current) {
+        if (current.isIdle()) flushResults(!delivery.cancelled);
+        if (!pending().size) status(undefined);
+        widget();
+        scheduleExit();
+      }
+      polling = false;
+    }
   }
 
   pi.on("session_start", (_event, context) => {
@@ -192,14 +224,17 @@ export function lifecycle(pi: ExtensionAPI) {
     ctx = context;
     active = true;
     finished = false;
-    cancelled = false;
     outcome = undefined;
     launching.clear();
-    written.clear();
+    // Reload does not discard pi's deferred sends; retain their ownership and cancellation, not an extra receipt.
+    const session = context.sessionManager.getSessionFile() ?? context.sessionManager.getSessionId();
+    const previous = (globalThis as any)[DELIVERY_KEY] as { session: string; state: typeof delivery } | undefined;
+    delivery = previous?.session === session ? previous.state : { written: new Map(), cancelled: false };
+    (globalThis as any)[DELIVERY_KEY] = { session, state: delivery };
     blocked.clear();
     (globalThis as any)[PENDING_COUNT_KEY] = pendingCount;
     if (context.mode === "tui") stopWatchingKeys = context.ui.onTerminalInput(data => {
-      if (getKeybindings().matches(data, "app.interrupt")) { cancelled = true; cancelExit(); }
+      if (getKeybindings().matches(data, "app.interrupt")) { delivery.cancelled = true; cancelExit(); }
       return undefined; // observe only
     });
     widget();
@@ -208,12 +243,22 @@ export function lifecycle(pi: ExtensionAPI) {
       pollTimer.unref();
     }
   });
-  pi.on("input", cancelExit);
-  pi.on("message_start", cancelExit);
-  pi.on("agent_start", () => { cancelled = false; outcome = undefined; });
-  pi.on("agent_before_settle", event => { outcome = event.outcome; });
+  pi.on("input", () => { delivery.cancelled = false; cancelExit(); });
+  pi.on("message_start", (event, context) => {
+    cancelExit();
+    // A deferred result wake can outlive Escape and /tree; identify our message, not the active branch.
+    if (delivery.cancelled && event.message.role === "custom" && event.message.customType === "swarm_result") {
+      const id = (event.message.details as { spawnEntryId?: string } | undefined)?.spawnEntryId;
+      if (id && delivery.written.has(id)) context.abort();
+    }
+  });
+  pi.on("agent_start", () => { outcome = undefined; });
+  pi.on("turn_end", resultBoundary);
+  pi.on("agent_before_settle", event => { outcome = event.outcome; return resultBoundary(event); });
   pi.on("agent_settled", () => {
-    candidate = !cancelled && !!outcome && outcome !== "aborted";
+    // A result may arrive while another before-settle handler awaits; pi defers this turn until settlement finishes.
+    flushResults(outcome === "completed" && !delivery.cancelled);
+    candidate = !delivery.cancelled && !!outcome && outcome !== "aborted";
     widget();
     scheduleExit();
   });
@@ -233,6 +278,7 @@ export function lifecycle(pi: ExtensionAPI) {
     ctx?.ui.setWidget("swarm", undefined);
     status(undefined);
     if ((globalThis as any)[PENDING_COUNT_KEY] === pendingCount) delete (globalThis as any)[PENDING_COUNT_KEY];
+    if (event.reason !== "reload" && (globalThis as any)[DELIVERY_KEY]?.state === delivery) delete (globalThis as any)[DELIVERY_KEY];
     if (finished && event.reason === "quit" && ctx?.mode === "tui") closeOwnPaneOnExit();
   });
 
@@ -245,7 +291,7 @@ export function lifecycle(pi: ExtensionAPI) {
       }
       return found;
     },
-    archived: (id: string) => written.has(id) || ctx!.sessionManager.getEntries().some(entry => resultId(entry) === id),
+    archived: (id: string) => ctx!.sessionManager.getEntries().some(entry => resultId(entry) === id),
     pending: (session: string) => [...pending().values()].some(run => sessionPath(run.session) === sessionPath(session)),
     /** Persist the spawn record before the child is started; it is not supervised until `launched`. */
     record(run: Run): string {

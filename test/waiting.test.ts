@@ -11,9 +11,9 @@ test('a legal long name preserves the count of other peers on narrow panes',()=>
  console.log('LONG_NAME_WIDGET',JSON.stringify(text));
  assert.match(text,/\(\+2\)$/);assert.ok(visibleWidth(text)<=40);
 });
-test('detached spawn rendering no longer says board only',()=>{
- const text=spawnResult({content:[{type:'text',text:'peer started in w1:p9. Detached.'}],details:{name:'peer',pane:'w1:p9',detached:true}}, {expanded:false} as any,theme,{isPartial:false,isError:false} as any)!.render(80).join('\n');
- console.log('DETACHED_RENDERING',text);assert.match(text,/detached/);assert.doesNotMatch(text,/board only/);
+test('spawn result shows the peer name and pane',()=>{
+ const text=spawnResult({content:[{type:'text',text:'peer started in w1:p9.'}],details:{name:'peer',pane:'w1:p9'}}, {expanded:false} as any,theme,{isPartial:false,isError:false} as any)!.render(80).join('\n');
+ assert.match(text,/peer · started · w1:p9/);
 });
 test('waiting renders within width for long, Chinese and many names, including 0..100 columns',()=>{
  const themes=[theme,{...theme,fg:(_c:string,s:string)=>`\x1b[31m${s}\x1b[39m`}];

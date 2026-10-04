@@ -6,7 +6,6 @@ import { initTheme, keyHint, ToolExecutionComponent } from "@earendil-works/pi-c
 import { Box, visibleWidth, KeybindingsManager, type Component } from "@earendil-works/pi-tui";
 import swarm from "../src/index.ts";
 import { agentRow, noticeView, waitingView } from "../src/ui.ts";
-import { formatNote, type Note } from "../src/board.ts";
 
 initTheme("dark", false);
 // Configure the host's instance (npm can install a separate peer copy for local tests).
@@ -27,20 +26,15 @@ const messages = new Map<string, Function>();
 swarm({ on() {}, registerFlag() {}, registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer: (name: string, renderer: Function) => messages.set(name, renderer) } as any);
 const context = (args: any = {}, extra: any = {}) => ({ args, expanded: false, isError: false, isPartial: false, ...extra });
 const result = (text: string, details?: any) => ({ content: [{ type: "text" as const, text }], details });
-const now = Date.now();
-const note: Note = { from: "researcher", created: now - 180_000, expires: now + 23 * 3600_000, message: "Short summary.\n\n## Detail\n\n- First finding\n- Second finding" };
-const rendered = (value: any, expanded = false, flags: any = {}, tool = "swarm_board"): Component => tools.get(tool).renderResult(value, { expanded, isPartial: false }, theme, context({}, flags) as any);
+const rendered = (value: any, expanded = false, flags: any = {}, tool = "swarm_send"): Component => tools.get(tool).renderResult(value, { expanded, isPartial: false }, theme, context({}, flags) as any);
 
 test("each tool call names its action and objects; only expanded calls show full body", () => {
   const cases: [string, any, RegExp][] = [
     ["swarm_spawn", { agent: "worker", name: "auth-review", task: "First preview\nSECOND_FULL_LINE" }, /spawn worker → auth-review/],
     ["swarm_send", { to: "*news*", message: "First preview\nSECOND_FULL_LINE" }, /send → \*news\*/],
     ["swarm_list", {}, /list · agents \+ presets/],
-    ["swarm_board", { message: "First preview\nSECOND_FULL_LINE" }, /post · board/],
     ["swarm_send", {}, /send → …/],
-    ["swarm_board", { message: "", from: "peer*", limit: 5 }, /post · board/],
-    ["swarm_spawn", { task: "First preview\nSECOND_FULL_LINE", detach: true }, /spawn inherited → … · detached/],
-    ["swarm_board", { from: "peer*", limit: 5 }, /board · from=peer\* · limit=5/],
+    ["swarm_spawn", { task: "First preview\nSECOND_FULL_LINE" }, /spawn inherited → …/],
   ];
   for (const [name, args, expected] of cases) {
     const tool = tools.get(name);
@@ -59,8 +53,8 @@ test("each tool call names its action and objects; only expanded calls show full
 
 test("result flags come from the fourth context argument; tools never add an inner Box", () => {
   backgrounds.length = 0;
-  assert.equal(new Set([...tools.values()].map(t => t.renderResult)).size, 4);
-  for (const tool of ["swarm_spawn", "swarm_send", "swarm_list", "swarm_board"]) {
+  assert.equal(new Set([...tools.values()].map(t => t.renderResult)).size, 3);
+  for (const tool of ["swarm_spawn", "swarm_send", "swarm_list"]) {
     const failed = rendered(result("Explicit failure"), false, { isError: true }, tool);
     assert.ok(!(failed instanceof Box));
     assert.match(failed.render(80).join(""), /\x1b\[38;5;196m/);
@@ -98,26 +92,7 @@ test("collapsed output is bounded by display rows and uses the configured expans
   assert.ok(rendered(result("这是一行很长的中文正文".repeat(150)), true).render(40).length > 8);
 });
 
-test("board uses structured notices, separates narrow metadata and renders relative time anew", () => {
-  const component = rendered(result("DO_NOT_RENDER_WIRE_TEXT", { notes: [note] }), true);
-  const before = plain(component.render(120));
-  assert.match(before, /researcher · 3m ago/);
-  assert.match(before, /3m ago · expires in (22|23)h/);
-  assert.doesNotMatch(before, /DO_NOT_RENDER_WIRE_TEXT/);
-  const narrow = component.render(20);
-  assert.ok(narrow.every(line => visibleWidth(line) <= 20));
-  assert.ok(stripVTControlCharacters(narrow[1]).includes("researcher"));
-  assert.doesNotMatch(stripVTControlCharacters(narrow[1]), /3m ago/);
-  assert.match(plain(narrow), /3m ago/);
-  const originalNow = Date.now;
-  try {
-    Date.now = () => now + 120_000;
-    assert.match(plain(component.render(120)), /5m ago/);
-  } finally { Date.now = originalNow; }
-  assert.doesNotMatch(formatNote(note), /\x1b/);
-});
-
-test("send distinguishes submitted/rejected/unknown; a post shows the board and relative expiry", () => {
+test("send distinguishes submitted/rejected/unknown", () => {
   const component = rendered(result("wire", { deliveries: [
     { to: "a", status: "submitted" }, { to: "b", status: "rejected", code: "agent_blocked", error: "herdr agent_blocked: approval dialog" },
     { to: "c", status: "unknown", code: "timeout", error: "herdr timeout" },
@@ -129,13 +104,11 @@ test("send distinguishes submitted/rejected/unknown; a post shows the board and 
   assert.match(lines.join(""), /\x1b\[38;5;40m✓ submitted/);
   assert.match(lines.join(""), /\x1b\[38;5;214m\? unknown/);
   assert.match(lines.join(""), /\x1b\[38;5;196mherdr agent_blocked/);
-  assert.doesNotMatch(output, /read|acknowledged|Board:|\d{4}-\d\d-\d\d/, "pushed messages are not stored");
-  const only = rendered(result("wire", { board: "/source/board/", note, deliveries: [], boardOnly: true }));
-  assert.match(plain(only.render(80)), /posted · board only/);
-  assert.match(plain(only.render(80)), /expires in (22|23)h/); assert.match(plain(only.render(80)), /Board: \/source\/board\//);
-  assert.doesNotMatch(plain(only.render(80)), /No matching|recipients|wire/);
+  assert.doesNotMatch(output, /read|acknowledged/, "submission is not acknowledgement");
+  const empty = rendered(result("wire", { deliveries: [] }));
+  assert.match(plain(empty.render(80)), /No matching named agents/);
   for (const expanded of [false, true]) for (const width of [1, 4, 8, 20, 80]) {
-    const lines = rendered(result("wire", { board: "/source/board/", note, deliveries: [], boardOnly: true }), expanded).render(width);
+    const lines = rendered(result("wire", { deliveries: [] }), expanded).render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     if (!expanded) assert.ok(lines.length <= 8);
   }
@@ -161,13 +134,10 @@ test("list preserves actual statuses; waiting widget is a single warning-aware l
   for (const width of [1, 4, 8, 20, 80]) { const lines = widget.render(width); assert.equal(lines.length, 1); assert.ok(visibleWidth(lines[0]) <= width); }
 });
 
-test("native validation details are not mistaken for delivery or board details", () => {
-  for (const tool of ["swarm_send", "swarm_board"]) {
-    const value = result("message exceeds 4000 characters", { validationErrors: [{ path: "/message" }] });
-    const output = plain(rendered(value, true, { isError: true }, tool).render(60));
-    assert.match(output, /message exceeds 4000/);
-    assert.match(plain(rendered(value, true, {}, tool).render(60)), /message exceeds 4000/);
-  }
+test("native validation details are not mistaken for delivery details", () => {
+  const value = result("message exceeds 4000 characters", { validationErrors: [{ path: "/message" }] });
+  assert.match(plain(rendered(value, true, { isError: true }).render(60)), /message exceeds 4000/);
+  assert.match(plain(rendered(value, true).render(60)), /message exceeds 4000/);
 });
 
 test("unknown notices use custom-message background and warning, never success", () => {

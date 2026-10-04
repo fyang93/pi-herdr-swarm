@@ -3,15 +3,14 @@ import { Type } from "@earendil-works/pi-ai";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
-import { boardPath, boardSenders, MESSAGE_LIMIT, formatNote, post, readBoard } from "./board.ts";
-import { availableName, deliver, ensurePiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
+import { MESSAGE_LIMIT, availableName, deliver, ensurePiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
 import { loadout, presets, snapshot } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
-import { callView, spawnResult, sendResult, listResult, boardResult, noticeView, resultMessageView } from "./ui.ts";
+import { callView, spawnResult, sendResult, listResult, noticeView, resultMessageView } from "./ui.ts";
 
 export { PENDING_COUNT_KEY } from "./run.ts";
 function textResult(text: string, details: unknown = undefined, isError = false) {
-  if (text.length > 30_000) text = `${text.slice(0, 29_900)}\n… truncated; narrow the board filters or limit.`;
+  if (text.length > 30_000) text = `${text.slice(0, 29_900)}\n… truncated.`;
   return { content: [{ type: "text" as const, text }], details, isError };
 }
 const messageLimit = { minLength: 1, maxLength: MESSAGE_LIMIT, description: "Up to 4000 characters." };
@@ -25,15 +24,19 @@ export default function swarm(pi: ExtensionAPI) {
   }
   let project: string | undefined;
   const roots = new Map<string, string>();
-  function path() {
+  function projectScope() {
     if (!project) throw new Error("Swarm project unavailable; check the session startup error.");
-    return boardPath(project);
+    return { root: project, roots };
   }
   const name = (context: ExtensionContext) => identity(value => context.ui.notify(`This session is now named ${value}`, "info"));
   // `pi --swarm-agent <preset>` starts any session as that preset, e.g. when a host launches it outside swarm_spawn.
   pi.registerFlag("swarm-agent", { type: "string", description: "Start this session as a swarm preset: its model, thinking and role." });
   let role: string | undefined;
   pi.on("session_start", async (_event, context) => {
+    const settings = pi.getSettings() as { swarm?: { autoEnableCodemode?: unknown }; defaultTools?: string[] };
+    if (settings.swarm?.autoEnableCodemode !== false && !settings.defaultTools?.includes("-codemode") && pi.getAllTools().some(tool => tool.name === "codemode") && !pi.getActiveTools().includes("codemode")) {
+      pi.setActiveTools([...pi.getActiveTools(), "codemode"]);
+    }
     project = undefined;
     roots.clear();
     void ensurePiIntegration(message => context.ui.notify(message, "warning"));
@@ -57,7 +60,7 @@ export default function swarm(pi: ExtensionAPI) {
   type History = ReturnType<typeof runState.history>;
   /** Restore an ended run of ours: same session and saved configuration; the next reply follows `boundary`. */
   async function prepareResume(params: { resume?: string; agent?: string; model?: string; cwd?: string; name?: string }, history: History, known: string) {
-    if ([params.agent, params.model, params.cwd, params.name].some(v => v !== undefined)) throw new Error("resume accepts only task and optional detach.");
+    if ([params.agent, params.model, params.cwd, params.name].some(v => v !== undefined)) throw new Error("resume accepts only task.");
     const previous = history.get(params.resume!);
     const saved = previous?.snapshot;
     if (!previous?.session || !saved?.model || !saved.thinking || !saved.cwd) {
@@ -69,7 +72,7 @@ export default function swarm(pi: ExtensionAPI) {
       if (runState.pending(previous.session) || agents.some(a => a.name === peer) || sessionBinding(agents, previous.session)) {
         throw new Error("run is live, pending or its online state is unknown");
       }
-      if (!previous.detach && !runState.archived(previous.entryId)) throw new Error("previous result is not archived");
+      if (!runState.archived(previous.entryId)) throw new Error("previous result is not archived");
       const session = await realpath(previous.session);
       return { peer, config: { ...saved, cwd: await realpath(saved.cwd) }, session, boundary: readSession(session).getLeafId() };
     } catch (error) {
@@ -80,8 +83,7 @@ export default function swarm(pi: ExtensionAPI) {
   async function prepareSpawn(params: { agent?: string; name?: string; model?: string; cwd?: string }, history: History, known: string, context: ExtensionContext) {
     const preset = params.agent === undefined ? undefined : presets(context.cwd, context.isProjectTrusted()).find(p => p.name === params.agent);
     if (params.agent !== undefined && !preset) throw new Error(`Unknown preset ${params.agent}. Use swarm_list.`);
-    const taken = [...history.keys(), ...await boardSenders(path())];
-    const peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), taken));
+    const peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), history.keys()));
     if (history.has(peer)) throw new Error(`${peer} was already spawned; use resume explicitly. ${known}`);
     const config = await snapshot(preset, context, pi.getThinkingLevel(), params);
     const runsDir = join(context.sessionManager.getSessionDir(), "swarm-runs");
@@ -92,11 +94,11 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. Its final reply comes back to you when it ends. With detach, nothing comes back. resume continues one of your ended runs with its context and configuration; only task and detach may accompany it.",
-    parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1, description: "Name of a peer this session spawned earlier (not a session path)." })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })), detach: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. Use swarm_send to communicate during the task. Close its pane to stop it. resume continues one of your ended runs with its context and configuration; only task may accompany it.",
+    parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1, description: "Name of a peer this session spawned earlier (not a session path)." })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
-      path();
+      projectScope();
       if (!context.sessionManager.getSessionFile()) throw new Error("swarm_spawn requires a persistent pi session.");
       const spawner = await name(context);
       const history = runState.history();
@@ -112,25 +114,25 @@ export default function swarm(pi: ExtensionAPI) {
       try {
         launched = await start({
           name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), near: [...history.keys()],
-          beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config, detach: !!params.detach }); },
+          beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config }); },
         });
       } finally { if (entry) runState.launched(entry); }
-      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. ${params.detach ? "Detached." : "When it ends, its final reply arrives in this session as a swarm_result message and a wake-up notice starts a new turn, so you can end this turn now."}`, { name: peer, pane: launched.pane, detached: !!params.detach, resumed: params.resume !== undefined });
+      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. When it ends, its final reply arrives in this session as a single swarm_result message, so you can end this turn now.`, { name: peer, pane: launched.pane, resumed: params.resume !== undefined });
     },
     renderCall(args, theme, context) {
       const title = args.resume ? theme.fg("toolTitle", theme.bold("resume ")) + theme.fg("accent", args.resume) : theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "inherited") + theme.fg("dim", " → ") + theme.fg("accent", args.name || "…");
-      return callView(title + theme.fg("dim", args.detach ? " · detached" : ""), args.task || "", context.expanded, theme);
+      return callView(title, args.task || "", context.expanded, theme);
     },
     renderResult: spawnResult,
   });
   pi.registerTool({
     name: "swarm_send", label: "Swarm send",
-    description: "Send to an exact name (any project) or a '*' pattern (named agents in this project, excluding sender). to is required. Nothing is stored. Reports submitted (written to terminal, not necessarily read), rejected or unknown. Post notices with swarm_board.",
+    description: "Send a message to another agent for updates, questions, decisions, or follow-up work. Call this tool directly, not as a shell command. `to` accepts an exact name or a name pattern using `*` as a wildcard; wildcard matches stay within this project and exclude the sender. Use '*' to announce to all other named agents in this project.",
     parameters: Type.Object({ message: Type.String(messageLimit), to: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
       const from = await name(context);
-      const result = await deliver({ from, to: params.to, message: params.message }, { root: project!, roots });
+      const result = await deliver({ from, to: params.to, message: params.message }, projectScope());
       const failed = !!result.discovery || result.deliveries.some(d => d.status !== "submitted");
       const lines = result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`);
       if (result.discovery) lines.push(`Recipient discovery ${result.discovery.status}${result.discovery.code ? ` [${result.discovery.code}]` : ""}: ${result.discovery.error}`);
@@ -156,30 +158,6 @@ export default function swarm(pi: ExtensionAPI) {
     },
     renderCall(_args, theme, context) { return callView(theme.fg("toolTitle", theme.bold("list")) + theme.fg("dim", " · agents + presets"), "", context.expanded, theme); },
     renderResult: listResult,
-  });
-  pi.registerTool({
-    name: "swarm_board", label: "Swarm board",
-    description: "With message, post a project notice for 24 hours; wakes nobody. Without message, read newest notices (20 default, 100 max). from filters reads by exact name or '*' pattern; from and limit are ignored when posting.",
-    parameters: Type.Object({ message: Type.Optional(Type.String(messageLimit)), from: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
-    async execute(_id, params, _signal, _update, context) {
-      const board = path();
-      if (params.message !== undefined) {
-        requireHerdr();
-        const from = await name(context);
-        const note = await post(board, { from, message: params.message }, warning => context.ui.notify(warning, "warning"));
-        return textResult(`posted · board only\nBoard: ${board}\nRetained until ${new Date(note.expires).toISOString()}.`, { board, note, deliveries: [], boardOnly: true });
-      }
-      const skipped: string[] = [];
-      const notes = await readBoard(board, params, warning => { if (skipped.length < 100) skipped.push(warning); });
-      return textResult([notes.map(note => formatNote(note)).join("\n\n") || "No notices.", ...skipped].join("\n\n"), { notes, skipped });
-    },
-    renderCall(args, theme, context) {
-      const title = args.message !== undefined
-        ? theme.fg("toolTitle", theme.bold("post")) + theme.fg("dim", " · board")
-        : theme.fg("toolTitle", theme.bold("board")) + theme.fg("dim", ` · from=${args.from || "*"} · limit=${args.limit ?? 20}`);
-      return callView(title, args.message || "", context.expanded, theme);
-    },
-    renderResult: boardResult,
   });
   pi.registerMessageRenderer("swarm_result", (message, options, theme) => resultMessageView(String(message.content), message.details as any, options.expanded, theme));
   pi.registerMessageRenderer("swarm_notice", (message, options, theme) => noticeView(String(message.content), options.expanded, theme));

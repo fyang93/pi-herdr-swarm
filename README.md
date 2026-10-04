@@ -1,6 +1,6 @@
 # pi-herdr-swarm
 
-A swarm of [pi](https://github.com/badlogic/pi-mono) agents inside [herdr](https://herdr.dev). Four concepts: **names** (herdr's online addresses), **messages** pushed to a name or a group, a shared **board** of notices, and **sessions** (where results live). Groups, delegation, pipelines and coordination are compositions of these; there is no hierarchy. Spawning only creates an optional wait for one run's result. Any agent can message or spawn any other.
+A swarm of [pi](https://github.com/badlogic/pi-mono) agents inside [herdr](https://herdr.dev). Three concepts: **names** (herdr's online addresses), **messages** pushed to a name or a group, and **sessions** (where results live). Groups, delegation, pipelines and coordination are compositions of these; there is no hierarchy. Spawning returns immediately; its result arrives when the run ends. Any agent can message or spawn any other.
 
 ## Install
 
@@ -14,52 +14,45 @@ pi install git:github.com/fyang93/pi-herdr-swarm
 
 ```typescript
 swarm_spawn({ name: "review-1", task: "Review this change and report findings." });
-swarm_spawn({ task: "Watch the logs and post anything unusual.", detach: true });
+swarm_spawn({ task: "Monitor service health. Whenever it changes, send the parent a concise update so it can analyze it; keep monitoring." });
 swarm_spawn({ resume: "review-1", task: "Now review the follow-up change." });
 
 swarm_send({ to: "review-1", message: "Also check input validation." });
 swarm_send({ to: "*review*", message: "The change is ready." });   // every matching agent in this project
-swarm_board({ message: "Notes are in reports/notes.md" });         // a notice on the board, wakes nobody
+swarm_send({ to: "*", message: "Notes are in reports/notes.md" }); // announce to all other named agents in this project
 
 swarm_list();
-swarm_board({ from: "*review*", limit: 10 });
 ```
 
 | Tool | Does |
 |---|---|
-| `swarm_spawn({task, agent?, name?, model?, cwd?, detach?})` | Starts a fresh pi in a new pane and returns immediately. The role goes in `task`. Its final reply comes back to you when it ends. With `detach`, nobody waits and nothing comes back; the reply stays in its session. |
-| `swarm_spawn({resume, task, detach?})` | Continues one of your ended runs with its full context and saved configuration. |
-| `swarm_send({message, to})` | Requires `to`. Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. Nothing is stored. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
-| `swarm_board({message})` | Posts a notice on the project board, readable by every agent for 24 hours. Wakes nobody. `from` and `limit` are ignored when posting. |
+| `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. The role goes in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
+| `swarm_spawn({resume, task})` | Continues one of your ended runs with its full context and saved configuration. |
+| `swarm_send({message, to})` | Requires `to`. Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. No separate message store. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
 | `swarm_list()` | Online agents (name, state, pane) and available presets. |
-| `swarm_board({from?, limit?})` | Without `message`, reads recent notices, newest first (20 default, 100 max); `from` is a name or a `*` pattern. |
 
 ## How a run works
 
-1. **Spawn.** A new pane opens by splitting the roomiest of your pane and your peers' panes, so peers tile together (a background tab only when none can be split into two usable halves) and pi starts there with the task. You keep working; a line shows `Waiting: review-1`.
-2. **Work.** The peer can message, post notices or spawn helpers of its own.
-3. **End.** When it finishes it exits and closes its pane. Escape or typing in its pane keeps it open.
-4. **Result.** You see that its session has ended, read its final reply from the session file, and get it as a `swarm_result` plus a short wake-up notice. Errors, interruptions and empty replies are reported as such.
+1. **Spawn.** A new pane opens by splitting the roomiest of your pane and your peers' panes, so peers tile together (a background tab only when none can be split into two usable halves) and pi starts there with the task. The task is sent verbatim, without a prompt wrapper; it defines what work to do and when to report. You keep working; a line shows `Waiting: review-1`.
+2. **Work.** The peer can message or spawn helpers of its own. Long-running monitoring scripts keep the task active and can send updates with codemode's `tools.swarm_send()`; keeping a pane open alone does not keep monitoring.
+3. **End.** Peers exit and close their pane when the task settles. Escape or typing in their pane keeps it open. Close a pane to stop a running task.
+4. **Result.** When a peer session ends, the extension reads its final reply and delivers it into your session as a single `swarm_result` message. It starts a reply when you are idle, or enters at the next safe turn boundary while you are working; no separate `finished` notice is sent. Clearing the input queue does not discard results. A result already handed to pi may arrive on the branch you navigate to; Escape prevents its automatic reply, not its archival.
 
-Your waits survive restarts: they are derived from your own session. A host extension that auto-exits can read the same pending count:
+Your waits survive restarts: they are derived from your own session. A peer waits for its own helpers before exiting; start long-running monitors from a session that will remain available. Resuming an ended run uses the unified lifecycle. A host extension that auto-exits can read the same pending count:
 
 ```typescript
 const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?.() ?? 0;
 ```
 
-## The board
+## Announcements and reports
 
-The board holds only what agents choose to post: findings others should see, decisions, what each is working on. Private messages and results never land there. It is `<git root>/.pi/swarm/board/`, one Markdown file per notice, readable with `cat` and `grep`. Notices are at most 4000 characters (put longer work in a file and post its path) and are kept for 24 hours.
-
-Two compositions:
+Use `swarm_send` with `to: "*"` for project-wide announcements, or a name pattern for a group. Broadcasts reach currently online named agents other than the sender, not agents that join later. Messages are at most 4000 characters; write detailed reports or persistent findings to ordinary files, then send a summary and path.
 
 ```typescript
-// Share a finding, then point the group at it.
-swarm_board({ message: "The flaky test comes from a shared temp dir; details in reports/flaky.md" });
-swarm_send({ to: "*test*", message: "Posted the flaky-test finding on the board." });
+// After writing reports/flaky.md, notify the group.
+swarm_send({ to: "*test*", message: "The flaky test comes from a shared temp dir; details in reports/flaky.md" });
 
-// Announce what you are taking on, so others can see it before starting the same work.
-swarm_board({ message: "Taking: migrate the config loader" });
+swarm_send({ to: "*", message: "Taking: migrate the config loader" });
 ```
 
 An announcement is not a lock: two agents can announce the same work at nearly the same moment and both proceed. When only one executor may act, the host must enforce it.
@@ -82,16 +75,18 @@ Report actionable findings with file paths.
 In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/settings.json` (the project wins):
 
 ```json
-{ "swarm": { "maxAgents": 16 } }
+{ "swarm": { "maxAgents": 16, "autoEnableCodemode": true } }
 ```
 
 `maxAgents` (default 16) caps the online agents per project when spawning. It is a precheck, not a strict limit under concurrency.
 
+`autoEnableCodemode` (default true) activates an already registered `codemode` tool when swarm loads in a session, including peers. Set it to false to manage tool activation yourself, including across reloads. An explicit `defaultTools: ["-codemode"]` also prevents auto-activation. Neither opt-out disables codemode enabled elsewhere or changes `codemode.mode`.
+
 ## Contracts
 
 1. **Scope.** One local herdr instance. A project is a Git root (or the cwd outside Git); worktrees and nested repositories are separate projects.
-2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed. The board's 24 hours is retention, not a deadline.
-3. **Host.** Interactive pi (TUI). Reloading through the SDK or RPC while a turn runs is not supported: the TUI refuses it, and a result read just before could be delivered twice.
+2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed.
+3. **Host.** Interactive pi (TUI). Idle reload retains in-flight results and cancellation; reloading through the SDK or RPC while a turn runs remains unsupported.
 4. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
 
 ## Development

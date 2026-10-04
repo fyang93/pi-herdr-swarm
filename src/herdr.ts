@@ -5,8 +5,24 @@ import { realpath } from "node:fs/promises";
 import { mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { checkMessage, namePattern, validateName } from "./board.ts";
-export { validateName };
+export const MESSAGE_LIMIT = 4000;
+const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+export function validateName(name: string): string {
+  if (!NAME.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
+  return name;
+}
+/** An exact name, or a pattern with '*' anywhere (anchored, consecutive stars merged). Names are groups. */
+export function namePattern(address: string): (name: string) => boolean {
+  if (!address.includes("*")) { validateName(address); return name => name === address; }
+  if (!/^[a-z0-9_*-]{1,128}$/.test(address)) throw new Error("Wildcard addresses support only name characters and '*', not '?', brackets or other glob syntax.");
+  const pattern = new RegExp(`^${address.replace(/\*+/g, ".*")}$`);
+  return name => pattern.test(name);
+}
+export function checkMessage(message: string): string {
+  if (typeof message !== "string" || !message.trim()) throw new Error("Message must be nonempty.");
+  if (message.length > MESSAGE_LIMIT) throw new Error(`Message exceeds ${MESSAGE_LIMIT} characters; write the body to a file, then send a summary and file path.`);
+  return message;
+}
 
 const exec = promisify(execFile);
 export class HerdrError extends Error {
@@ -147,7 +163,7 @@ export async function deliver(input: { from: string; to: string; message: string
   }
   const text = `[swarm message] ${validateName(input.from)} → ${input.to}\n${message}`;
   deliveries.push(...await Promise.all(targets.map(async (to): Promise<Delivery> => {
-    // It would land as a new user message in the sender's own session; keep notes in context, or post to the board.
+    // It would land as a new user message in the sender's own session; keep notes in context or in a file.
     if (to === input.from) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
     try {
       await prompt(to, text);

@@ -5,7 +5,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "nod
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { boardPath, readBoard } from "../src/board.ts";
 import { readSession, type Run } from "../src/run.ts";
 
 // Own the entire private server so every pane inherits the same no-network fixture configuration.
@@ -26,7 +25,7 @@ mkdirSync(dir); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 copyFileSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), "extensions/herdr-agent-state.ts"), join(agentDir, "extensions/herdr-agent-state.ts"));
 writeFileSync(join(agentDir, "extensions/demo.ts"), `export {default} from ${JSON.stringify(resolve("test/e2e-peer.ts"))};`);
 writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off", swarm: { maxAgents: 3 } }));
-const file = join(dir, "spawner.jsonl"); const board = boardPath(dir);
+const file = join(dir, "spawner.jsonl");
 const marker = (steps: { tool: string; args: any }[]) => `SWARM_TEST:${JSON.stringify({ steps })}`;
 const step = (tool: string, args: any = {}) => ({ tool, args });
 const barrier = (name: string) => writeFileSync(join(dir, name), "released");
@@ -64,13 +63,8 @@ try {
   const a = record("demo-a");
 
   // Native terminal connection and delivery, not fake-herdr error classification.
-  const posted = await invoke("swarm_board", { message: "BOARD_ONLY" });
-  assert.equal(posted.isError, false);
-  assert.equal(posted.details.boardOnly, true);
-  assert.match((await invoke("swarm_board", { from: "demo-spawner", limit: 1 })).content[0].text, /BOARD_ONLY/);
   assert.equal((await invoke("swarm_send", { message: "MISSING_TO" })).isError, true);
-  assert.ok((await readBoard(board)).some(n => n.message === "BOARD_ONLY"));
-  const tooLong = await invoke("swarm_board", { message: "x".repeat(4001) }); assert.equal(tooLong.isError, true);
+  const tooLong = await invoke("swarm_send", { to: "demo-a", message: "x".repeat(4001) }); assert.equal(tooLong.isError, true);
   const capped = await invoke("swarm_spawn", { name: "too-many", task: "no launch" }); assert.equal(capped.isError, true);
   assert.equal((await live()).some(a => a.name === "too-many"), false);
   await cli(["agent", "rename", a.pane, "--clear"]); await sleep(2200); assert.equal(results("demo-a").length, 0);
@@ -81,20 +75,23 @@ try {
   await sleep(3000); // let both peers send while blocked in their wait tool; steers land after it returns
   barrier("finish"); await finish("demo-a"); await finish("demo-b");
   assert.ok(received(record("demo-b").session, "A_DIRECT") && received(record("demo-b").session, "A_BROADCAST") && received(a.session, "B_DIRECT"), "mutual sends and broadcast");
-  assert.deepEqual((await readBoard(board)).map(n => n.message), ["BOARD_ONLY"], "pushed messages are not stored on the board");
-  console.log("communication: native mutual messages, broadcast and board-only passed");
+  assert.ok(received(file, "A_BROADCAST"), "project announcement also reaches the spawner");
+  console.log("communication: native mutual messages and wildcard announcements passed");
 
-  await invoke("swarm_spawn", { name: "detached", task: marker([]), detach: true }); await ended("detached");
-  assert.equal(record("detached").detach, true); assert.equal(results("detached").length, 0);
-  assert.equal((await readBoard(board)).some(n => n.from === "detached"), false, "nothing is posted automatically");
-  assert.ok(readSession(record("detached").session).getBranch().some(e => e.type === "message" && e.message.role === "assistant"), "its final reply stays in its session");
+  await invoke("swarm_spawn", { name: "monitor", task: marker([step("e2e_wait", { file: "monitor-change" }), step("swarm_send", { to: "demo-spawner", message: "MONITOR_CHANGE" }), step("e2e_wait", { file: "monitor-stop" })]) });
+  assert.ok((await live()).some(a => a.name === "monitor"), "a running monitor stays online");
+  assert.equal(results("monitor").length, 0);
+  barrier("monitor-change"); await wait(() => received(file, "MONITOR_CHANGE"), "monitor update while still running");
+  assert.ok((await live()).some(a => a.name === "monitor")); assert.equal(results("monitor").length, 0);
+  barrier("monitor-stop"); await finish("monitor");
+  console.log("monitoring: updates arrive during the task; stop returns one result and closes the peer");
   const boundary = readSession(a.session).getLeafId();
   await invoke("swarm_spawn", { resume: "demo-a", task: marker([]) }); await finish("demo-a", 2);
   assert.equal(record("demo-a").session, a.session); assert.equal(record("demo-a").boundary, boundary);
   await invoke("swarm_spawn", { resume: "demo-a", task: "/e2e-no-reply" }); await finish("demo-a", 3);
   assert.equal((results("demo-a").at(-1) as any).details.status, "empty");
   assert.match(String((results("demo-a").at(-1) as any).content), /No new reply in this run/);
-  console.log("startup/history: detach and consecutive same-session resume passed");
+  console.log("startup/history: consecutive same-session resume passed");
 
   // A manually launched pi on that same session has no internal launch flags.
   const manualPane = (await cli(["tab", "create", "--workspace", workspace!, "--no-focus", "--cwd", dir])).root_pane.pane_id;

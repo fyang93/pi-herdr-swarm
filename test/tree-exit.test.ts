@@ -13,7 +13,7 @@ after(()=>rmSync(dir,{recursive:true,force:true}));
 for(const fresh of [false,true]) test(fresh?'resumed peer: a new reply on a branch before launch boundary must not crash':'resumed peer: tree navigation before launch boundary cancels the old exit candidate',async()=>{
  const manager=SessionManager.create(dir,dir);manager.appendMessage({role:'user',content:'intro task',timestamp:Date.now()});manager.appendMessage(fauxAssistantMessage('earlier assistant'));const earlierAssistant=manager.getLeafId()!;manager.appendMessage({role:'user',content:'old task',timestamp:Date.now()});manager.appendMessage(fauxAssistantMessage('old final'));const boundary=manager.getLeafId()!;
  const peer=SessionManager.create(dir,mkdtempSync(join(dir,'peer-')));peer.appendMessage({role:'user',content:'task',timestamp:Date.now()});peer.appendMessage(fauxAssistantMessage('child final'));
- manager.appendCustomEntry('swarm_spawn',{name:'child',pane:'w1:p9',session:peer.getSessionFile(),boundary:null,detach:false,snapshot:{cwd:dir,model:'review/test',thinking:'off'}});
+ manager.appendCustomEntry('swarm_spawn',{name:'child',pane:'w1:p9',session:peer.getSessionFile(),boundary:null,snapshot:{cwd:dir,model:'review/test',thinking:'off'}});
  const live={name:'child',agent:'pi',agent_status:'working',pane_id:'w1:p9',cwd:dir,agent_session:{kind:'path',value:peer.getSessionFile()}};
  const marker=join(dir,'list-inflight');writeFileSync(join(dir,'state.json'),JSON.stringify({agents:[live],delayList:700,listMarker:marker}));
  const faux=fauxProvider({provider:'review',models:[{id:'test',reasoning:false}]});faux.setResponses([fauxAssistantMessage('new finished candidate'),fauxAssistantMessage('fresh reply on selected branch')]);

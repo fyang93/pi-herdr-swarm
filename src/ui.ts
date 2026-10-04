@@ -1,6 +1,5 @@
 import { keyHint, getMarkdownTheme, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Text, Markdown, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import type { Note } from "./board.ts";
 import type { Delivery, LiveAgent } from "./herdr.ts";
 
 const preview = (text: string) => text.split(/\r?\n/).find(line => line.trim())?.trim() || "";
@@ -56,25 +55,6 @@ export function waitingView(names: string[], statuses: Map<string, string>, them
   };
 }
 
-function duration(ms: number): string {
-  const seconds = Math.floor(Math.abs(ms) / 1000);
-  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : seconds < 86_400 ? `${Math.floor(seconds / 3600)}h` : `${Math.floor(seconds / 86_400)}d`;
-}
-function expiry(note: Note, theme: Theme): string {
-  const left = note.expires - Date.now();
-  return left > 0 ? theme.fg("dim", `expires in ${duration(left)}`) : theme.fg("warning", `expired ${duration(left)} ago`);
-}
-function noteLines(note: Note, width: number, expanded: boolean, theme: Theme): string[] {
-  const now = Date.now();
-  const head = theme.fg("accent", theme.bold(note.from));
-  const age = note.created > now ? `in ${duration(note.created - now)}` : `${duration(now - note.created)} ago`;
-  const meta = theme.fg("dim", age) + theme.fg("dim", " · ") + expiry(note, theme);
-  const header = visibleWidth(`${head} · ${meta}`) <= width ? `${head}${theme.fg("dim", " · ")}${meta}` : `${head}\n${meta}`;
-  return [...textLines(header, width), ...(expanded
-    ? new Markdown(note.message, 0, 0, getMarkdownTheme(), { color: text => theme.fg("toolOutput", text) }).render(width)
-    : [truncateToWidth(theme.fg("toolOutput", preview(note.message)), width)])];
-}
-
 type Renderer = NonNullable<ToolDefinition["renderResult"]>;
 type Result = Parameters<Renderer>[0];
 const output = (result: Result) => result.content.filter(c => c.type === "text").map(c => c.text).join("\n");
@@ -85,8 +65,8 @@ function resultView(expanded: boolean, partial: boolean, theme: Theme, lines: (w
 
 export const spawnResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { name: string; pane: string; detached: boolean; resumed?: boolean } | undefined;
-  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}${data.detached ? " · detached" : ""}`) : theme.fg("toolOutput", output(result)), width);
+  const data = result.details as { name: string; pane: string; resumed?: boolean } | undefined;
+  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}`) : theme.fg("toolOutput", output(result)), width);
 });
 export const sendResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   const data = result.details as { deliveries: Delivery[]; discovery?: Omit<Delivery, "to"> } | undefined;
@@ -111,21 +91,6 @@ export const listResult: Renderer = (result, options, theme, context) => resultV
   for (const agent of data.agents) lines.push(...textLines(agentRow(agent, theme), width));
   lines.push(...textLines(theme.fg("toolTitle", "Presets"), width));
   for (const preset of data.presets) lines.push(...textLines(theme.fg("accent", theme.bold(preset.name)) + theme.fg("dim", `${preset.model ? ` [${preset.model}]` : ""} · ${preset.description}`), width));
-  return lines;
-});
-export const boardResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
-  if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { board: string; note: Note; boardOnly: true } | { notes: Note[]; skipped?: string[]; boardOnly?: false } | undefined;
-  if (data?.boardOnly) return [
-    ...textLines(theme.fg("success", "posted · board only"), width),
-    ...textLines(theme.fg("dim", "posted · ") + expiry(data.note, theme), width),
-    ...textLines(theme.fg("dim", `Board: ${data.board}`), width),
-  ];
-  if (!Array.isArray(data?.notes)) return textLines(theme.fg("toolOutput", output(result)), width);
-  const lines = textLines(theme.fg("dim", `${data.notes.length} ${data.notes.length === 1 ? "notice" : "notices"}`), width);
-  for (const note of data.notes) lines.push(...noteLines(note, width, options.expanded, theme));
-  if (!data.notes.length) lines.push(...textLines(theme.fg("dim", "No notices."), width));
-  for (const warning of data.skipped || []) lines.push(...textLines(theme.fg("warning", warning), width));
   return lines;
 });
 

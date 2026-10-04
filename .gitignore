@@ -1,4 +1,5 @@
 node_modules/
+.pi/settings.json
 .pi/swarm/
 .design-brief.md
 .design-addendum.md
