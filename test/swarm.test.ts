@@ -237,7 +237,8 @@ test("list does not name the caller; send names it once with a notification", as
   const h = await harness();
   try {
     assert.deepEqual([...h.tools.keys()], ["swarm_spawn", "swarm_send", "swarm_list"]);
-    await h.tool("swarm_list");
+    const listed = await h.tool("swarm_list");
+    assert.equal(listed.details.presets.length > 0, listed.content[0].text.includes("Presets:"));
     assert.equal(calls().some(c => c[1] === "rename"), false);
     for (const to of ["peer", "*"]) {
       const sent = await h.tool("swarm_send", { to, message: "announcement" });

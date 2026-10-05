@@ -89,8 +89,10 @@ export const listResult: Renderer = (result, options, theme, context) => resultV
   if (!data) return textLines(theme.fg("toolOutput", output(result)), width);
   const lines = textLines(theme.fg("dim", `${data.agents.length} agents · ${data.presets.length} presets`), width);
   for (const agent of data.agents) lines.push(...textLines(agentRow(agent, theme), width));
-  lines.push(...textLines(theme.fg("toolTitle", "Presets"), width));
-  for (const preset of data.presets) lines.push(...textLines(theme.fg("accent", theme.bold(preset.name)) + theme.fg("dim", `${preset.model ? ` [${preset.model}]` : ""} · ${preset.description}`), width));
+  if (data.presets.length) {
+    lines.push(...textLines(theme.fg("toolTitle", "Presets"), width));
+    for (const preset of data.presets) lines.push(...textLines(theme.fg("accent", theme.bold(preset.name)) + theme.fg("dim", `${preset.model ? ` [${preset.model}]` : ""} · ${preset.description}`), width));
+  }
   return lines;
 });
 

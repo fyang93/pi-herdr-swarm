@@ -128,6 +128,9 @@ test("list preserves actual statuses; waiting widget is a single warning-aware l
   assert.match(plain(list.render(100)), /⚠ blocked/);
   assert.match(plain(list.render(100)), /worker \[provider\/model\] · Code review/);
   assert.doesNotMatch(plain(list.render(100)), /Unlisted does not prove/);
+  const emptyPresets = rendered(result("wire", { agents: [], presets: [] }), true, {}, "swarm_list");
+  assert.doesNotMatch(plain(emptyPresets.render(100)), /Presets/);
+  assert.match(plain(emptyPresets.render(100)), /0 agents · 0 presets/);
   const widget = waitingView(["研究员", "reviewer", "writer", "another"], new Map([["研究员", "blocked"]]), theme);
   assert.match(widget.render(80)[0], /\x1b\[38;5;214m研究员/);
   assert.match(plain(widget.render(24)), /Waiting: 研究员 \(\+3\)/);

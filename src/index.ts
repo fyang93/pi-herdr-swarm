@@ -153,8 +153,9 @@ export default function swarm(pi: ExtensionAPI) {
       requireHerdr();
       const agents = await list();
       const available = presets(context.cwd, context.isProjectTrusted());
-      return textResult(agents.map(a => `${a.name || "(unnamed)"} · ${a.agent_status || "unknown"} · ${a.pane_id}`).join("\n") +
-        `\n\nPresets:\n${available.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`).join("\n")}`, { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })) });
+      const agentLines = agents.map(a => `${a.name || "(unnamed)"} · ${a.agent_status || "unknown"} · ${a.pane_id}`);
+      const presetLines = available.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`);
+      return textResult([agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })) });
     },
     renderCall(_args, theme, context) { return callView(theme.fg("toolTitle", theme.bold("list")) + theme.fg("dim", " · agents + presets"), "", context.expanded, theme); },
     renderResult: listResult,
