@@ -1,9 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { realpath } from "node:fs/promises";
-import { mkdirSync, realpathSync } from "node:fs";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { realpathSync } from "node:fs";
 export const MESSAGE_LIMIT = 4000;
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 export function validateName(name: string): string {
@@ -99,18 +98,11 @@ async function prompt(to: string, text: string): Promise<void> {
   const result = await herdr(["agent", "prompt", to, text]);
   if (result?.type !== "agent_prompted") throw new Error("Malformed herdr prompt reply; submission unknown.");
 }
-/** Supervision reads each pi's session path, which herdr's pi integration reports: install it when missing. */
-export async function ensurePiIntegration(notify: (message: string) => void): Promise<void> {
+/** Supervision reads each pi's session path, which herdr's pi integration reports. */
+export async function checkPiIntegration(notify: (message: string) => void): Promise<void> {
   if (process.env.HERDR_ENV !== "1") return;
   const status = String(await herdr(["integration", "status"], 10_000, true).catch(() => ""));
-  if (/^pi: current\b/m.test(status)) return;
-  try {
-    mkdirSync(join(getAgentDir(), "extensions"), { recursive: true });
-    await herdr(["integration", "install", "pi"], 30_000, true);
-    notify("Installed herdr's pi integration; pi sessions started before this report no session path until restarted.");
-  } catch (error) {
-    notify(`swarm needs herdr's pi integration; run herdr integration install pi (${String(error)})`);
-  }
+  if (!/^pi: current\b/m.test(status)) notify("swarm needs herdr's pi integration: run `herdr integration install pi`, then restart pi sessions.");
 }
 export function requireHerdr(): void {
   if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) throw new Error("Start pi inside a herdr pane.");

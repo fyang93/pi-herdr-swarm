@@ -4,7 +4,7 @@ A swarm of [pi](https://github.com/badlogic/pi-mono) agents inside [herdr](https
 
 ## Install
 
-Requires Node 22.19+, herdr >=0.9.0 on Linux/macOS (>=0.9.1 on Windows), and pi 0.99.2+ running inside herdr. Supervision depends on herdr's pi integration reporting each session's path; the extension installs it when missing (pi sessions started before that need a restart).
+Requires Node 22.19+, herdr >=0.9.0 on Linux/macOS (>=0.9.1 on Windows), and pi 0.99.2+ running inside herdr. Supervision depends on herdr's pi integration reporting each session's path: run `herdr integration install pi` once (pi sessions started before that need a restart); the extension warns when it is missing.
 
 ```sh
 pi install git:github.com/fyang93/pi-herdr-swarm
@@ -36,7 +36,7 @@ swarm_list();
 1. **Spawn.** A new pane opens by splitting the roomiest of your pane and your peers' panes, so peers tile together (a background tab only when none can be split into two usable halves) and pi starts there with the task. The task is sent verbatim, without a prompt wrapper; it defines what work to do and when to report. You keep working; a line shows `Waiting: review-1`.
 2. **Work.** The peer can message or spawn helpers of its own. Long-running monitoring scripts keep the task active and can send updates with codemode's `tools.swarm_send()`; keeping a pane open alone does not keep monitoring.
 3. **End.** Peers exit and close their pane when the task settles. Escape or typing in their pane keeps it open. Close a pane to stop a running task.
-4. **Result.** When a peer session ends, the extension reads its final reply and delivers it into your session as a single `swarm_result` message. The peer's system prompt says so, so its last reply restates the whole result even after it answered a later message. It starts a reply when you are idle, or enters at the next safe turn boundary while you are working; no separate `finished` notice is sent. Clearing the input queue does not discard results. A result already handed to pi may arrive on the branch you navigate to; Escape prevents its automatic reply, not its archival.
+4. **Result.** When a peer session ends, the extension reads its final reply and delivers it into your session as a single `swarm_result` message. The peer's system prompt tells it so and asks it to restate the whole result in its last reply, even after answering a later message. It starts a reply when you are idle, or enters at the next safe turn boundary while you are working; no separate `finished` notice is sent. Clearing the input queue does not discard results. A result already handed to pi may arrive on the branch you navigate to; Escape prevents its automatic reply, not its archival.
 
 Your waits survive restarts: they are derived from your own session. A peer waits for its own helpers before exiting; start long-running monitors from a session that will remain available. A host extension that auto-exits can read the same pending count:
 
@@ -47,13 +47,6 @@ const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?
 ## Announcements and reports
 
 Use `swarm_send` with `to: "*"` for project-wide announcements, or a name pattern for a group. Broadcasts reach currently online named agents other than the sender, not agents that join later. Messages are at most 4000 characters; write detailed reports or persistent findings to ordinary files, then send a summary and path.
-
-```typescript
-// After writing reports/flaky.md, notify the group.
-swarm_send({ to: "*test*", message: "The flaky test comes from a shared temp dir; details in reports/flaky.md" });
-
-swarm_send({ to: "*", message: "Taking: migrate the config loader" });
-```
 
 An announcement is not a lock: two agents can announce the same work at nearly the same moment and both proceed. When only one executor may act, the host must enforce it.
 
@@ -87,7 +80,7 @@ In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/setting
 1. **Scope.** One local herdr instance. A project is a Git root (or the cwd outside Git); worktrees and nested repositories are separate projects.
 2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed.
 3. **Host.** Interactive pi (TUI). Idle reload retains in-flight results and cancellation; reloading through the SDK or RPC while a turn runs remains unsupported.
-4. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
+4. **Permissions.** Roles grant nothing; hard guarantees belong to the host.
 
 ## Development
 

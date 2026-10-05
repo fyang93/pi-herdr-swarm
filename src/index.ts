@@ -3,7 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
-import { MESSAGE_LIMIT, availableName, currentPane, deliver, ensurePiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
+import { MESSAGE_LIMIT, availableName, currentPane, deliver, checkPiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
 import { loadout, presets, requiredTools, snapshot } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, noticeView, resultMessageView } from "./ui.ts";
@@ -44,7 +44,7 @@ export default function swarm(pi: ExtensionAPI) {
     requireTools(requiredTools(pi.getFlag("swarm-tools")), context);
     project = undefined;
     roots.clear();
-    void ensurePiIntegration(message => context.ui.notify(message, "warning"));
+    void checkPiIntegration(message => context.ui.notify(message, "warning"));
     project = await projectRoot(context.cwd);
     const agent = pi.getFlag("swarm-agent");
     if (typeof agent !== "string" || !agent) return;

@@ -340,15 +340,15 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
 });
 
 
-test("a missing herdr pi integration is installed once at session start", async () => {
+test("a missing herdr pi integration is reported, never installed", async () => {
   reset({ integration: "pi: not installed" }); const h = await harness();
   try {
     await sleep(300);
-    assert.ok(calls().some(c => c[0] === "integration" && c[1] === "install" && c[2] === "pi"));
-    assert.ok(h.notices.some(n => typeof n === "string" && n.includes("Installed herdr's pi integration")));
+    assert.equal(calls().some(c => c[0] === "integration" && c[1] === "install"), false);
+    assert.ok(h.notices.some(n => typeof n === "string" && n.includes("herdr integration install pi")));
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
   reset(); const current = await harness();
-  try { await sleep(300); assert.equal(calls().some(c => c[0] === "integration"), false); }
+  try { await sleep(300); assert.equal(current.notices.some(n => typeof n === "string" && n.includes("integration")), false); }
   finally { await current.event("session_shutdown", { reason: "reload" }); }
 });
 
