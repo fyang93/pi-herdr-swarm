@@ -260,6 +260,14 @@ test("optional presets snapshot only configuration, respect trust and override o
   const untrustedPeer = await snapshot(undefined, context, "high", {});
   assert.equal(untrustedPeer.extensionLoaded, false);
   assert.ok(loadout(untrustedPeer, join(dir, "peer.jsonl")).includes("-e"));
+  // pi reads only <cwd>/.pi/settings.json, not the Git root's, and trust is inherited from the nearest ancestor.
+  writeFileSync(join(global, "trust.json"), JSON.stringify({ [dir]: true }));
+  assert.equal((await snapshot(undefined, context, "high", {})).extensionLoaded, true);
+  const nestedCwd = join(dir, "nested-settings"); mkdirSync(nestedCwd, { recursive: true });
+  const nestedPeer = await snapshot(undefined, { ...context, cwd: nestedCwd }, "high", {});
+  assert.equal(nestedPeer.extensionLoaded, false);
+  assert.ok(loadout(nestedPeer, join(dir, "peer.jsonl")).includes("-e"));
+  rmSync(join(dir, ".pi/settings.json"));
   assert.equal(readFileSync(join(dir, "system.md"), "utf8"), "Project body");
   assert.deepEqual(args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
   for (const fields of [{ "session-mode": "fork" }, { cli: "claude" }]) await assert.rejects(snapshot({ ...preset, fields }, context, "high", {}));
@@ -321,11 +329,11 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     const args = calls().find(c => c[1] === "start")!;
     assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-4.1");
     assert.equal(args.includes("--tools"), false);
-    assert.equal(args.includes("--approve"), true);
+    assert.equal(args.includes("--approve"), false);
     const other = join(dir, "nested");
     await h.tool("swarm_spawn", { name: "second", task: "TASK", cwd: other });
     assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 2);
-    assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), true);
+    assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
     assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "ROLE_IN_TASK");
     assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "TASK");

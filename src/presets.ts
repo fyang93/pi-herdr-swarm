@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { projectRoot } from "./herdr.ts";
 
 export const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
 const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
@@ -38,11 +37,11 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
   const settings = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return {}; } };
   const hasPackage = (value: any) => (Array.isArray(value.packages) ? value.packages : []).some((pkg: any) => String(typeof pkg === "string" ? pkg : pkg?.source ?? "").replace(/\/$/, "").endsWith("pi-herdr-swarm"));
   const globalSettings = settings(join(agentDir(), "settings.json"));
-  const root = await projectRoot(cwd);
+  // Mirror pi: trust is the nearest decision at or above cwd, and project settings are <cwd>/.pi/settings.json.
   let projectTrusted = false;
   try {
     const trust = settings(join(agentDir(), "trust.json"));
-    let dir = await realpath(root);
+    let dir = cwd;
     let decided = false;
     while (true) {
       if (typeof trust[dir] === "boolean") { projectTrusted = trust[dir]; decided = true; break; }
@@ -52,12 +51,12 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
     }
     if (!decided && globalSettings.defaultProjectTrust === "always") projectTrusted = true;
   } catch { /* Unknown trust: load explicitly with -e. */ }
-  const projectSettings = projectTrusted ? settings(join(root, ".pi/settings.json")) : {};
+  const projectSettings = projectTrusted ? settings(join(cwd, ".pi/settings.json")) : {};
   return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined, extensionLoaded: hasPackage(globalSettings) || hasPackage(projectSettings) };
 }
 /** pi command-line arguments that reproduce a snapshot. */
 export function loadout(config: Snapshot, session: string): string[] {
-  const args = ["--session", session, "--approve", ...(config.extensionLoaded ? [] : ["-e", extensionPath]), "--model", config.model, "--thinking", config.thinking];
+  const args = ["--session", session, ...(config.extensionLoaded ? [] : ["-e", extensionPath]), "--model", config.model, "--thinking", config.thinking];
   if (config.prompt) {
     const path = join(dirname(session), "system.md");
     writeFileSync(path, config.prompt);

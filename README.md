@@ -91,7 +91,7 @@ In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/setting
 1. **Scope.** One local herdr instance. A project is a Git root (or the cwd outside Git); worktrees and nested repositories are separate projects.
 2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed.
 3. **Host.** Interactive pi (TUI). Idle reload retains in-flight results and cancellation; reloading through the SDK or RPC while a turn runs remains unsupported.
-4. **Permissions.** Roles grant nothing. Spawned peers start with `--approve`, allowing pi to load project resources in the selected working directory; choose that directory deliberately. This does not provide a sandbox or isolation. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
+4. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
 
 ## Development
 

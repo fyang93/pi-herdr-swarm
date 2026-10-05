@@ -121,15 +121,14 @@ try {
   await invoke("e2e_state"); assert.equal(results("escape-peer").length, 1);
   console.log("cancellation: busy Escape keeps exactly one result and continuation processes it");
 
-  // An explicitly selected cwd is approved for project resources, without a trust dialog.
-  const selectedCwd = join(base, "selected-cwd"); mkdirSync(join(selectedCwd, ".pi"), { recursive: true }); writeFileSync(join(selectedCwd, ".pi/settings.json"), "{}");
-  const approvedTask = marker([]);
-  const startup = await invoke("swarm_spawn", { name: "trust-test", cwd: selectedCwd, task: approvedTask });
-  assert.equal(startup.isError, false); assert.ok(record("trust-test").session);
-  await finish("trust-test");
-  assert.ok(received(record("trust-test").session, approvedTask), "task submitted in the approved cwd");
-  assert.equal((results("trust-test").at(-1) as any).details.status, "reply");
-  console.log("startup: selected cwd is approved and the task completes without a trust dialog");
+  // A real trust dialog returns not-ready, but the pre-start record is already durable.
+  const untrusted = join(base, "untrusted"); mkdirSync(join(untrusted, ".pi"), { recursive: true }); writeFileSync(join(untrusted, ".pi/settings.json"), "{}");
+  const startup = await invoke("swarm_spawn", { name: "trust-test", cwd: untrusted, task: "never submitted while blocked" });
+  assert.equal(startup.isError, true); assert.match(JSON.stringify(startup.content), /agent_not_ready|Session identity unavailable/); assert.ok(record("trust-test").session);
+  const dialog = await exec("herdr", ["--session", server, "pane", "read", record("trust-test").pane, "--source", "recent-unwrapped", "--lines", "30"], { encoding: "utf8" });
+  assert.match(dialog.stdout, /Trust project folder/);
+  await cli(["pane", "close", record("trust-test").pane]); await finish("trust-test");
+  console.log("startup: real trust-blocked launch retains its record and session path");
   console.log(`PASS: isolated herdr demo (${server})`);
 } catch (error) {
   try { const agents = await live(); console.error(JSON.stringify(agents)); for (const agent of agents) console.error(JSON.stringify(await cli(["agent", "read", agent.pane_id, "--source", "recent-unwrapped", "--lines", "50"]))); } catch {}
