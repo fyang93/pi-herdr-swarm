@@ -94,8 +94,8 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. Use swarm_send to communicate during the task. Close its pane to stop it. resume continues one of your ended runs with its context and configuration; only task may accompany it.",
-    parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1, description: "Name of a peer this session spawned earlier (not a session path)." })), agent: Type.Optional(Type.String({ minLength: 1 })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
+    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. For a fresh peer, use swarm_list to discover available presets and select a suitable one with agent. Omit agent only when no preset fits; describe the work and requirements in task. Use swarm_send to communicate during the task. Close its pane to stop it. resume continues one of your ended runs with its context and configuration; only task may accompany it.",
+    parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1, description: "Name of a peer this session spawned earlier (not a session path)." })), agent: Type.Optional(Type.String({ minLength: 1, description: "Preset name from swarm_list." })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
       projectScope();
@@ -147,7 +147,7 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_list", label: "Swarm list",
-    description: "Online agents (name, status, pane) and available presets.",
+    description: "Show your swarm name, parent (when spawned), online agents, status, panes, and available presets.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
       requireHerdr();
@@ -155,7 +155,10 @@ export default function swarm(pi: ExtensionAPI) {
       const available = presets(context.cwd, context.isProjectTrusted());
       const agentLines = agents.map(a => `${a.name || "(unnamed)"} · ${a.agent_status || "unknown"} · ${a.pane_id}`);
       const presetLines = available.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`);
-      return textResult([agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })) });
+      const self = pi.getFlag("swarm-name");
+      const parent = pi.getFlag("swarm-spawner");
+      const identity = typeof self === "string" ? `Self: ${self}${typeof parent === "string" ? `\nParent: ${parent}` : ""}` : "";
+      return textResult([identity, agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].filter(Boolean).join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })), self: typeof self === "string" ? self : undefined, parent: typeof parent === "string" ? parent : undefined });
     },
     renderCall(_args, theme, context) { return callView(theme.fg("toolTitle", theme.bold("list")) + theme.fg("dim", " · agents + presets"), "", context.expanded, theme); },
     renderResult: listResult,

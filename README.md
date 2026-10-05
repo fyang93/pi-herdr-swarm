@@ -14,7 +14,7 @@ pi install git:github.com/fyang93/pi-herdr-swarm
 
 ```typescript
 swarm_spawn({ name: "review-1", task: "Review this change and report findings." });
-swarm_spawn({ task: "Monitor service health. Whenever it changes, send the parent a concise update so it can analyze it; keep monitoring." });
+swarm_spawn({ agent: "monitor", task: "Keep an eye on health.json and tell me if the service status changes." });
 swarm_spawn({ resume: "review-1", task: "Now review the follow-up change." });
 
 swarm_send({ to: "review-1", message: "Also check input validation." });
@@ -26,10 +26,10 @@ swarm_list();
 
 | Tool | Does |
 |---|---|
-| `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. The role goes in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
+| `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. Select a preset role with `agent`, or describe the role in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
 | `swarm_spawn({resume, task})` | Continues one of your ended runs with its full context and saved configuration. |
 | `swarm_send({message, to})` | Requires `to`. Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. No separate message store. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
-| `swarm_list()` | Online agents (name, state, pane) and available presets. |
+| `swarm_list()` | Your swarm name and parent (when spawned), online agents (name, state, pane), and available presets. |
 
 ## How a run works
 
@@ -59,7 +59,11 @@ An announcement is not a lock: two agents can announce the same work at nearly t
 
 ## Presets
 
-Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, and a body that is appended to the peer's system prompt (its role and rules). Presets configure; they never restrict tools, extensions or skills, which pi loads as usual. Without a preset, a peer inherits your current model and thinking. To start a session as a preset outside `swarm_spawn` (say, from a script), run `pi --swarm-agent <name>`.
+Bundled roles live in `agents/*.md`. For a fresh peer, discover presets with `swarm_list` and select a suitable one with `agent`; omit `agent` when none fits. Resume uses the previous session and saved configuration, without selecting a new preset.
+
+The built-in **monitor** role observes task-defined state using an awaited codemode loop and reports relevant changes. It requires a script-checkable exit condition. For an open-ended watch, it establishes an external stop signal and tells the parent how to trigger it; the parent must trigger that signal rather than merely send a stop message, which can remain queued while a tool runs. The script checks the signal and exits before reporting that monitoring stopped. Closing its pane forcibly stops the agent. There is no background daemon.
+
+Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, and a body that is appended to the peer's system prompt (its role and rules). User presets override bundled presets of the same name; trusted project presets override user presets. Presets configure; they never restrict tools, extensions or skills, which pi loads as usual. Without a preset, a peer inherits your current model and thinking. To start a session as a preset outside `swarm_spawn` (say, from a script), run `pi --swarm-agent <name>`.
 
 ```markdown
 ---
@@ -87,7 +91,7 @@ In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/setting
 1. **Scope.** One local herdr instance. A project is a Git root (or the cwd outside Git); worktrees and nested repositories are separate projects.
 2. **Delivery.** Names are online addresses and can disappear while an agent runs. `submitted` means the text reached the recipient's terminal, not that it was read; a message arriving just as the recipient exits may go unprocessed.
 3. **Host.** Interactive pi (TUI). Idle reload retains in-flight results and cancellation; reloading through the SDK or RPC while a turn runs remains unsupported.
-4. **Permissions.** Roles grant nothing. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
+4. **Permissions.** Roles grant nothing. Spawned peers start with `--approve`, allowing pi to load project resources in the selected working directory; choose that directory deliberately. This does not provide a sandbox or isolation. Give each side-effecting action (writing a shared file, calling an external system) a single executor and parallelize research around it. Hard guarantees belong to the host.
 
 ## Development
 

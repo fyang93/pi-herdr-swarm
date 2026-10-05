@@ -14,7 +14,7 @@ export interface Preset { name: string; description: string; body: string; field
 export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string; extensionLoaded?: boolean }
 export function presets(cwd: string, trusted: boolean): Preset[] {
   const found = new Map<string, Preset>();
-  for (const dir of [join(agentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
+  for (const dir of [fileURLToPath(new URL("../agents/", import.meta.url)), join(agentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
     if (!existsSync(dir)) continue;
     for (const file of readdirSync(dir).filter(f => f.endsWith(".md")).sort()) {
       const { frontmatter, body } = parseFrontmatter(readFileSync(join(dir, file), "utf8"));
@@ -57,7 +57,7 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
 }
 /** pi command-line arguments that reproduce a snapshot. */
 export function loadout(config: Snapshot, session: string): string[] {
-  const args = ["--session", session, ...(config.extensionLoaded ? [] : ["-e", extensionPath]), "--model", config.model, "--thinking", config.thinking];
+  const args = ["--session", session, "--approve", ...(config.extensionLoaded ? [] : ["-e", extensionPath]), "--model", config.model, "--thinking", config.thinking];
   if (config.prompt) {
     const path = join(dirname(session), "system.md");
     writeFileSync(path, config.prompt);

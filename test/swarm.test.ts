@@ -32,7 +32,7 @@ const calls = () => readFileSync(join(dir, "calls.jsonl"), "utf8").trim().split(
 const scope = { root: dir, roots: new Map<string, string>() };
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-async function harness() {
+async function harness(flags: Record<string, unknown> = {}) {
   const handlers = new Map<string, Function[]>();
   const tools = new Map<string, any>();
   const notices: any[] = [];
@@ -48,7 +48,7 @@ async function harness() {
   const activeTools = ["read", "swarm_spawn", "swarm_send", "swarm_list"];
   swarm({
     on: (name: string, fn: Function) => handlers.set(name, [...(handlers.get(name) || []), fn]),
-    registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag() {},
+    registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag: (name: string) => flags[name],
     getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names); }, getAllTools: () => [...activeTools, "codemode"].map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
     appendEntry: (customType: string, data: any) => manager.appendCustomEntry(customType, data),
     sendMessage: async (message: any) => notices.push(message),
@@ -201,6 +201,40 @@ test("split respects caller geometry/divider; uncertain launch is not repeated o
   assert.equal(calls().some(c => c[1] === "close"), false); assert.equal(calls().filter(c => c[1] === "prompt").length, 1);
 });
 
+test("bundled monitor is discoverable, spawns with its role and verbatim task, and allows trusted overrides", async () => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const global = join(dir, "monitor-global");
+  const project = join(dir, ".pi/agents");
+  mkdirSync(join(global, "agents"), { recursive: true });
+  process.env.PI_CODING_AGENT_DIR = global;
+  reset();
+  const h = await harness();
+  try {
+    const monitor = presets(dir, false).find(p => p.name === "monitor")!;
+    assert.equal(monitor.fields.model, undefined, "inherits the host model");
+    const listed = await h.tool("swarm_list");
+    assert.ok(listed.details.presets.some((p: any) => p.name === "monitor"));
+    const task = "Keep an eye on health.json and tell me if the service status changes.";
+    await h.tool("swarm_spawn", { agent: "monitor", task });
+    const record = h.entries.find(e => e.customType === "swarm_spawn").data;
+    assert.equal(record.snapshot.prompt, monitor.body);
+    const args = calls().find(c => c[1] === "start")!;
+    assert.equal(readFileSync(args[args.indexOf("--append-system-prompt") + 1], "utf8"), monitor.body);
+    assert.equal(calls().find(c => c[1] === "prompt")!.at(-1), task);
+    writeFileSync(join(global, "agents/monitor.md"), "---\ndescription: user monitor\n---\nUser role");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, "monitor.md"), "---\ndescription: project monitor\n---\nProject role");
+    assert.equal(presets(dir, false).find(p => p.name === "monitor")?.body, "User role");
+    assert.equal(presets(dir, true).find(p => p.name === "monitor")?.body, "Project role");
+    assert.equal(presets(dir, true).filter(p => p.name === "monitor").length, 1);
+  } finally {
+    await h.event("session_shutdown", { reason: "reload" });
+    rmSync(join(project, "monitor.md"), { force: true });
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
+});
+
 test("optional presets snapshot only configuration, respect trust and override order", async () => {
   const global = join(dir, "global"); const project = join(dir, ".pi/agents");
   mkdirSync(join(global, "agents"), { recursive: true }); mkdirSync(project, { recursive: true });
@@ -234,11 +268,13 @@ test("optional presets snapshot only configuration, respect trust and override o
 
 test("list does not name the caller; send names it once with a notification", async () => {
   reset({ agents: [{ pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "peer", pane_id: "w1:p2", agent: "pi", cwd: dir }] });
-  const h = await harness();
+  const h = await harness({ "swarm-name": "spawner", "swarm-spawner": "parent" });
   try {
     assert.deepEqual([...h.tools.keys()], ["swarm_spawn", "swarm_send", "swarm_list"]);
     const listed = await h.tool("swarm_list");
     assert.equal(listed.details.presets.length > 0, listed.content[0].text.includes("Presets:"));
+    assert.match(listed.content[0].text, /Self: spawner\nParent: parent/);
+    assert.deepEqual({ self: listed.details.self, parent: listed.details.parent }, { self: "spawner", parent: "parent" });
     assert.equal(calls().some(c => c[1] === "rename"), false);
     for (const to of ["peer", "*"]) {
       const sent = await h.tool("swarm_send", { to, message: "announcement" });
@@ -275,6 +311,8 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     assert.match(h.tools.get("swarm_send").description, /Call this tool directly, not as a shell command/);
     assert.match(description, /stays running while its task runs, then exits/);
     assert.throws(() => validateToolArguments(h.tools.get("swarm_spawn"), { type: "toolCall", id: "test", name: "swarm_spawn", arguments: { task: "x", detach: true } }), /Validation failed/);
+    assert.match(description, /use swarm_list to discover available presets and select a suitable one with agent/);
+    assert.match(description, /Omit agent only when no preset fits/);
     assert.match(description, /Use swarm_send to communicate/);
     assert.doesNotMatch(description, /meaningful changes|monitoring a state/);
     await assert.rejects(h.tool("swarm_spawn", { agent: "unknown", task: "x" }), /Unknown preset/);
@@ -283,11 +321,11 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     const args = calls().find(c => c[1] === "start")!;
     assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-4.1");
     assert.equal(args.includes("--tools"), false);
-    assert.equal(args.includes("--approve"), false);
+    assert.equal(args.includes("--approve"), true);
     const other = join(dir, "nested");
     await h.tool("swarm_spawn", { name: "second", task: "TASK", cwd: other });
     assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 2);
-    assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);
+    assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), true);
     assert.equal(calls().filter(c => c[1] === "split").at(-1)!.includes("--env"), false);
     assert.equal(calls().find(c => c[1] === "prompt")!.at(-1)!, "ROLE_IN_TASK");
     assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "TASK");
