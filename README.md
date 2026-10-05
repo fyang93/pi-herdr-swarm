@@ -14,7 +14,7 @@ pi install git:github.com/fyang93/pi-herdr-swarm
 
 ```typescript
 swarm_spawn({ name: "review-1", task: "Review this change and report findings." });
-swarm_spawn({ agent: "monitor", task: "Keep an eye on health.json and tell me if the service status changes." });
+swarm_spawn({ agent: "monitor", task: "Keep an eye on health.json and tell me if the service status changes." }); // example preset, see Presets
 swarm_spawn({ resume: "review-1", task: "Now review the follow-up change." });
 
 swarm_send({ to: "review-1", message: "Also check input validation." });
@@ -29,7 +29,7 @@ swarm_list();
 | `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. Select a preset role with `agent`, or describe the role in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
 | `swarm_spawn({resume, task})` | Continues one of your ended runs with its full context and saved configuration. |
 | `swarm_send({message, to})` | Requires `to`. Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. No separate message store. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
-| `swarm_list()` | Your swarm name and parent (when spawned), online agents (name, state, pane), and available presets. |
+| `swarm_list()` | Your name, parent (when spawned), online agents (name, state, pane), and available presets. |
 
 ## How a run works
 
@@ -38,7 +38,7 @@ swarm_list();
 3. **End.** Peers exit and close their pane when the task settles. Escape or typing in their pane keeps it open. Close a pane to stop a running task.
 4. **Result.** When a peer session ends, the extension reads its final reply and delivers it into your session as a single `swarm_result` message. It starts a reply when you are idle, or enters at the next safe turn boundary while you are working; no separate `finished` notice is sent. Clearing the input queue does not discard results. A result already handed to pi may arrive on the branch you navigate to; Escape prevents its automatic reply, not its archival.
 
-Your waits survive restarts: they are derived from your own session. A peer waits for its own helpers before exiting; start long-running monitors from a session that will remain available. Resuming an ended run uses the unified lifecycle. A host extension that auto-exits can read the same pending count:
+Your waits survive restarts: they are derived from your own session. A peer waits for its own helpers before exiting; start long-running monitors from a session that will remain available. A host extension that auto-exits can read the same pending count:
 
 ```typescript
 const pending = (globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")]?.() ?? 0;
@@ -59,11 +59,7 @@ An announcement is not a lock: two agents can announce the same work at nearly t
 
 ## Presets
 
-Bundled roles live in `agents/*.md`. For a fresh peer, discover presets with `swarm_list` and select a suitable one with `agent`; omit `agent` when none fits. Resume uses the previous session and saved configuration, without selecting a new preset.
-
-The built-in **monitor** role observes task-defined state using an awaited codemode loop and reports relevant changes. It requires a script-checkable exit condition. For an open-ended watch, it establishes an external stop signal and tells the parent how to trigger it; the parent must trigger that signal rather than merely send a stop message, which can remain queued while a tool runs. The script checks the signal and exits before reporting that monitoring stopped. Closing its pane forcibly stops the agent. There is no background daemon.
-
-Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, and a body that is appended to the peer's system prompt (its role and rules). User presets override bundled presets of the same name; trusted project presets override user presets. Presets configure; they never restrict tools, extensions or skills, which pi loads as usual. Without a preset, a peer inherits your current model and thinking. To start a session as a preset outside `swarm_spawn` (say, from a script), run `pi --swarm-agent <name>`.
+Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, `requires-tools`, and a body that is appended to the peer's system prompt (its role and rules). Trusted project presets override user presets of the same name. Presets configure; they never restrict tools, extensions or skills, which pi loads as usual. `requires-tools` lists already registered tools the role depends on (`[codemode]`; a single name or comma-separated string also works); the peer activates them, and reports a missing one rather than installing it. Without a preset, a peer inherits your current model and thinking. To start a session as a preset outside `swarm_spawn` (say, from a script), run `pi --swarm-agent <name>`; it applies the model, thinking, role and required tools, while `cwd` applies only when spawning.
 
 ```markdown
 ---
@@ -74,17 +70,17 @@ thinking: high
 Report actionable findings with file paths.
 ```
 
+`examples/agents/monitor.md` is an example preset (a codemode watch loop with `requires-tools: [codemode]`), not loaded by default; copy it into an agents directory to use it.
+
 ## Settings
 
 In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/settings.json` (the project wins):
 
 ```json
-{ "swarm": { "maxAgents": 16, "autoEnableCodemode": true } }
+{ "swarm": { "maxAgents": 16 } }
 ```
 
 `maxAgents` (default 16) caps the online agents per project when spawning. It is a precheck, not a strict limit under concurrency.
-
-`autoEnableCodemode` (default true) activates an already registered `codemode` tool when swarm loads in a session, including peers. Set it to false to manage tool activation yourself, including across reloads. An explicit `defaultTools: ["-codemode"]` also prevents auto-activation. Neither opt-out disables codemode enabled elsewhere or changes `codemode.mode`.
 
 ## Contracts
 

@@ -62,7 +62,7 @@ test("exit: settled completion shuts down; manual, error and interrupted outcome
 test("a real codemode monitor sends changes while keeping the peer alive until stopped", async () => {
   let entered!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
-  const r = await runtime(true, pi => { createCodemodeExtension()(pi); pi.on("tool_execution_start", event => { if (event.toolName === "bash") entered(); }); });
+  const r = await runtime(true, pi => { createCodemodeExtension()(pi); pi.on("tool_execution_start", event => { if (event.toolName === "bash") entered(); }); }, undefined, { "swarm-tools": "codemode" });
   const cwd = r.session.sessionManager.getCwd(); const stop = join(cwd, "stop"); const status = join(cwd, "status");
   state([{ name: "worker", pane_id: "w1:p1", agent: "pi", cwd }, { name: "spawner", pane_id: "w1:p2", agent: "pi", cwd }]);
   writeFileSync(status, "ready");
@@ -372,6 +372,7 @@ test("read-only session boundaries never reuse old, abandoned, empty or corrupt 
   const file = manager.getSessionFile()!; const before = readFileSync(file, "utf8");
   assert.equal(readResult({ name: "peer", session: file, boundary }).text, "new"); assert.equal(readFileSync(file, "utf8"), before);
   assert.equal(readResult({ name: "peer", session: file, boundary: manager.getLeafId() }).status, "empty");
+  manager.appendMessage(fauxAssistantMessage("checking", { stopReason: "toolUse" })); assert.equal(readResult({ name: "peer", session: file, boundary }).status, "incomplete", "ended mid-tool is not a final reply");
   manager.appendMessage(fauxAssistantMessage("", { stopReason: "error", errorMessage: "quota" })); assert.equal(readResult({ name: "peer", session: file, boundary }).status, "error");
   manager.resetLeaf(); manager.appendMessage({ role: "user", content: "other root", timestamp: Date.now() }); manager.appendMessage(fauxAssistantMessage("do not reuse"));
   assert.equal(readResult({ name: "peer", session: file, boundary }).status, "unreadable");

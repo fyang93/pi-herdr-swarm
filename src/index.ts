@@ -3,8 +3,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
-import { MESSAGE_LIMIT, availableName, deliver, ensurePiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
-import { loadout, presets, snapshot } from "./presets.ts";
+import { MESSAGE_LIMIT, availableName, currentPane, deliver, ensurePiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
+import { loadout, presets, requiredTools, snapshot } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, noticeView, resultMessageView } from "./ui.ts";
 
@@ -31,12 +31,17 @@ export default function swarm(pi: ExtensionAPI) {
   const name = (context: ExtensionContext) => identity(value => context.ui.notify(`This session is now named ${value}`, "info"));
   // `pi --swarm-agent <preset>` starts any session as that preset, e.g. when a host launches it outside swarm_spawn.
   pi.registerFlag("swarm-agent", { type: "string", description: "Start this session as a swarm preset: its model, thinking and role." });
+  pi.registerFlag("swarm-tools", { type: "string", description: "Internal: tools a swarm preset requires, activated at session start." });
   let role: string | undefined;
+  /** Activate a preset's required tools; one that does not become active (unregistered, hidden) is reported, not fatal. */
+  function requireTools(names: string[], context: ExtensionContext) {
+    const add = names.filter(name => !pi.getActiveTools().includes(name));
+    if (add.length) pi.setActiveTools([...pi.getActiveTools(), ...add]);
+    const missing = names.filter(name => !pi.getActiveTools().includes(name));
+    if (missing.length) context.ui.notify(`swarm: required tools unavailable: ${missing.join(", ")}`, "warning");
+  }
   pi.on("session_start", async (_event, context) => {
-    const settings = pi.getSettings() as { swarm?: { autoEnableCodemode?: unknown }; defaultTools?: string[] };
-    if (settings.swarm?.autoEnableCodemode !== false && !settings.defaultTools?.includes("-codemode") && pi.getAllTools().some(tool => tool.name === "codemode") && !pi.getActiveTools().includes("codemode")) {
-      pi.setActiveTools([...pi.getActiveTools(), "codemode"]);
-    }
+    requireTools(requiredTools(pi.getFlag("swarm-tools")), context);
     project = undefined;
     roots.clear();
     void ensurePiIntegration(message => context.ui.notify(message, "warning"));
@@ -52,6 +57,7 @@ export default function swarm(pi: ExtensionAPI) {
       if (!model || !await pi.setModel(model)) throw new Error(`model ${config.model} unavailable`);
       pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
       role = config.prompt;
+      requireTools(config.tools ?? [], context);
     } catch (error) { try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
   });
   pi.on("before_agent_start", event => role ? { systemPrompt: `${event.systemPrompt}\n\n${role}` } : undefined);
@@ -94,7 +100,7 @@ export default function swarm(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. For a fresh peer, use swarm_list to discover available presets and select a suitable one with agent. Omit agent only when no preset fits; describe the work and requirements in task. Use swarm_send to communicate during the task. Close its pane to stop it. resume continues one of your ended runs with its context and configuration; only task may accompany it.",
+    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. agent selects a preset from swarm_list. Use swarm_send to communicate during the task. Close its pane to stop it. resume continues one of your ended runs with its context and configuration; only task may accompany it.",
     parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1, description: "Name of a peer this session spawned earlier (not a session path)." })), agent: Type.Optional(Type.String({ minLength: 1, description: "Preset name from swarm_list." })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
@@ -113,7 +119,7 @@ export default function swarm(pi: ExtensionAPI) {
       let launched;
       try {
         launched = await start({
-          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), near: [...history.keys()],
+          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), near: [...history.values()].map(run => run.session),
           beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config }); },
         });
       } finally { if (entry) runState.launched(entry); }
@@ -147,7 +153,7 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_list", label: "Swarm list",
-    description: "Show your swarm name, parent (when spawned), online agents, status, panes, and available presets.",
+    description: "Show your name, parent (when spawned), online agents, status, panes, and available presets.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
       requireHerdr();
@@ -155,10 +161,11 @@ export default function swarm(pi: ExtensionAPI) {
       const available = presets(context.cwd, context.isProjectTrusted());
       const agentLines = agents.map(a => `${a.name || "(unnamed)"} · ${a.agent_status || "unknown"} · ${a.pane_id}`);
       const presetLines = available.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`);
-      const self = pi.getFlag("swarm-name");
+      const pane = (await currentPane()).pane_id;
+      const self = agents.find(a => a.pane_id === pane)?.name;
       const parent = pi.getFlag("swarm-spawner");
-      const identity = typeof self === "string" ? `Self: ${self}${typeof parent === "string" ? `\nParent: ${parent}` : ""}` : "";
-      return textResult([identity, agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].filter(Boolean).join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })), self: typeof self === "string" ? self : undefined, parent: typeof parent === "string" ? parent : undefined });
+      const identity = [self && `Self: ${self}`, typeof parent === "string" && `Parent: ${parent}`].filter(Boolean).join("\n");
+      return textResult([identity, agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].filter(Boolean).join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })), self, parent: typeof parent === "string" ? parent : undefined });
     },
     renderCall(_args, theme, context) { return callView(theme.fg("toolTitle", theme.bold("list")) + theme.fg("dim", " · agents + presets"), "", context.expanded, theme); },
     renderResult: listResult,

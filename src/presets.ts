@@ -1,19 +1,23 @@
-import { parseFrontmatter, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, parseFrontmatter, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { clampThinkingLevel, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
-const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
 export interface Preset { name: string; description: string; body: string; fields: Record<string, unknown> }
 /** Resolved launch configuration, saved in the spawn record for resume. `prompt` is appended to pi's system prompt. */
-export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string; extensionLoaded?: boolean }
+/** `tools` are activated in the peer when registered; they add to pi's tools and never restrict them. */
+export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string; tools?: string[] }
+/** A preset's `requires-tools`: a YAML list (`[codemode]`), a name, or a comma-separated string. */
+export function requiredTools(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  return (Array.isArray(value) ? value : String(value).split(",")).map(name => String(name).trim()).filter(Boolean);
+}
 export function presets(cwd: string, trusted: boolean): Preset[] {
   const found = new Map<string, Preset>();
-  for (const dir of [fileURLToPath(new URL("../agents/", import.meta.url)), join(agentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
+  for (const dir of [join(getAgentDir(), "agents"), ...(trusted ? [join(cwd, ".pi/agents")] : [])]) {
     if (!existsSync(dir)) continue;
     for (const file of readdirSync(dir).filter(f => f.endsWith(".md")).sort()) {
       const { frontmatter, body } = parseFrontmatter(readFileSync(join(dir, file), "utf8"));
@@ -34,29 +38,14 @@ export async function snapshot(preset: Preset | undefined, context: ExtensionCon
   if (!selected) throw new Error(`Model unavailable: ${requested || "select a model before spawning"}`);
   const level = String(f.thinking ?? thinking);
   if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) throw new Error(`Invalid thinking level: ${level}`);
-  const settings = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return {}; } };
-  const hasPackage = (value: any) => (Array.isArray(value.packages) ? value.packages : []).some((pkg: any) => String(typeof pkg === "string" ? pkg : pkg?.source ?? "").replace(/\/$/, "").endsWith("pi-herdr-swarm"));
-  const globalSettings = settings(join(agentDir(), "settings.json"));
-  // Mirror pi: trust is the nearest decision at or above cwd, and project settings are <cwd>/.pi/settings.json.
-  let projectTrusted = false;
-  try {
-    const trust = settings(join(agentDir(), "trust.json"));
-    let dir = cwd;
-    let decided = false;
-    while (true) {
-      if (typeof trust[dir] === "boolean") { projectTrusted = trust[dir]; decided = true; break; }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    if (!decided && globalSettings.defaultProjectTrust === "always") projectTrusted = true;
-  } catch { /* Unknown trust: load explicitly with -e. */ }
-  const projectSettings = projectTrusted ? settings(join(cwd, ".pi/settings.json")) : {};
-  return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined, extensionLoaded: hasPackage(globalSettings) || hasPackage(projectSettings) };
+  const tools = requiredTools(f["requires-tools"]);
+  return { cwd, model: `${selected.provider}/${selected.id}`, thinking: clampThinkingLevel(selected, level as ModelThinkingLevel), prompt: preset?.body || undefined, tools: tools.length ? tools : undefined };
 }
 /** pi command-line arguments that reproduce a snapshot. */
 export function loadout(config: Snapshot, session: string): string[] {
-  const args = ["--session", session, ...(config.extensionLoaded ? [] : ["-e", extensionPath]), "--model", config.model, "--thinking", config.thinking];
+  // Always this copy: pi loads an identical path once, so an installed package is not loaded twice.
+  const args = ["--session", session, "-e", extensionPath, "--model", config.model, "--thinking", config.thinking];
+  if (config.tools?.length) args.push("--swarm-tools", config.tools.join(","));
   if (config.prompt) {
     const path = join(dirname(session), "system.md");
     writeFileSync(path, config.prompt);

@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -10,11 +10,11 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, validateToolArguments } from "@earendil-works/pi-ai";
 import { setTimeout as sleep } from "node:timers/promises";
 import { checkMessage, validateName, namePattern, deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
-import { presets, loadout, snapshot } from "../src/presets.ts";
+import { extensionPath, presets, loadout, requiredTools, snapshot } from "../src/presets.ts";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-test-"));
-const settings: { swarm?: { maxAgents?: unknown; autoEnableCodemode?: unknown }; defaultTools?: string[] } = {};
+const settings: { swarm?: { maxAgents?: unknown } } = {};
 const fake = resolve("test/fake-herdr.cjs");
 chmodSync(fake, 0o755);
 Object.assign(process.env, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1", HERDR_BIN_PATH: fake, FAKE_HERDR_DIR: dir });
@@ -46,10 +46,11 @@ async function harness(flags: Record<string, unknown> = {}) {
     ui: { setWidget() {}, notify: (message: string) => notices.push(message) }, shutdown: () => { shutdowns++; },
   };
   const activeTools = ["read", "swarm_spawn", "swarm_send", "swarm_list"];
+  const registered = [...activeTools, "codemode"]; // pi activates only registered, non-hidden tools
   swarm({
     on: (name: string, fn: Function) => handlers.set(name, [...(handlers.get(name) || []), fn]),
     registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag: (name: string) => flags[name],
-    getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names); }, getAllTools: () => [...activeTools, "codemode"].map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
+    getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names.filter(name => registered.includes(name))); }, getAllTools: () => registered.map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
     appendEntry: (customType: string, data: any) => manager.appendCustomEntry(customType, data),
     sendMessage: async (message: any) => notices.push(message),
   } as any);
@@ -59,23 +60,22 @@ async function harness(flags: Record<string, unknown> = {}) {
   return { context, notices, activeTools, get entries() { return manager.getEntries() as any[]; }, event, tool, tools, shutdowns: () => shutdowns };
 }
 
-test("swarm enables codemode once by default and opt-out preserves already enabled tools", async () => {
-  reset(); settings.swarm = {};
-  const enabled = await harness();
+test("no preset, no tool activation; a preset's required tools are activated once and missing ones reported", async () => {
+  reset();
+  const plain = await harness();
+  try { assert.equal(plain.activeTools.includes("codemode"), false); }
+  finally { await plain.event("session_shutdown", { reason: "reload" }); }
+  const peer = await harness({ "swarm-tools": "codemode,absent" });
   try {
-    assert.ok(enabled.activeTools.includes("codemode"));
-    await enabled.event("session_start");
-    settings.swarm = { autoEnableCodemode: false };
-    await enabled.event("session_start");
-    assert.equal(enabled.activeTools.filter(name => name === "codemode").length, 1);
-  } finally { await enabled.event("session_shutdown", { reason: "reload" }); }
-  const optedOut = await harness();
-  try { assert.equal(optedOut.activeTools.includes("codemode"), false); }
-  finally { settings.swarm = {}; await optedOut.event("session_shutdown", { reason: "reload" }); }
-  settings.defaultTools = ["-codemode"];
-  const disabled = await harness();
-  try { assert.equal(disabled.activeTools.includes("codemode"), false); }
-  finally { delete settings.defaultTools; await disabled.event("session_shutdown", { reason: "reload" }); }
+    assert.equal(peer.activeTools.filter(name => name === "codemode").length, 1);
+    await peer.event("session_start");
+    assert.equal(peer.activeTools.filter(name => name === "codemode").length, 1);
+    assert.ok(peer.notices.some(n => String(n).includes("required tools unavailable: absent")));
+  } finally { await peer.event("session_shutdown", { reason: "reload" }); }
+  assert.deepEqual(requiredTools(["codemode", "other"]), ["codemode", "other"]);
+  assert.deepEqual(requiredTools(undefined), []);
+  assert.deepEqual(requiredTools("codemode"), ["codemode"]);
+  assert.deepEqual(requiredTools("a, b"), ["a", "b"]);
 });
 
 test("message and name validation preserves limits and rejects invalid input", () => {
@@ -190,10 +190,10 @@ test("split respects caller geometry/divider; uncertain launch is not repeated o
   reset({ layout: { zoomed: true, panes: [] } }); assert.equal((await start(launch)).pane, "w1:p8");
   assert.deepEqual(calls().find(c => c[1] === "create")?.slice(0, 6), ["tab", "create", "--workspace", "w1", "--no-focus", "--label"]);
   const full = { zoomed: false, panes: [{ pane_id: "w1:p1", rect: { width: 92, height: 24 } }] };
-  reset({ agents: [{ name: "old-peer", pane_id: "w1:p5", agent: "pi", cwd: dir }], layouts: { "w1:p1": full, "w1:p5": { zoomed: false, panes: [{ pane_id: "w1:p5", rect: { width: 184, height: 49 } }] } } });
-  await start({ ...launch, near: ["old-peer"] }); // own pane full: the peer's roomy tab is split instead of opening another
+  reset({ agents: [{ name: "old-peer", pane_id: "w1:p5", agent: "pi", cwd: dir, agent_session: { kind: "path", value: "/s/old-peer.jsonl" } }, { name: "reused", pane_id: "w1:p6", agent: "pi", cwd: dir, agent_session: { kind: "path", value: "/s/other.jsonl" } }], layouts: { "w1:p1": full, "w1:p5": { zoomed: false, panes: [{ pane_id: "w1:p5", rect: { width: 184, height: 49 } }] } } });
+  await start({ ...launch, near: ["/s/old-peer.jsonl"] }); // own pane full: the peer's roomy tab is split instead of opening another
   assert.deepEqual(calls().find(c => c[1] === "split")?.slice(0, 5), ["pane", "split", "w1:p5", "--direction", "right"]);
-  reset({ layouts: { "w1:p1": full } }); await start({ ...launch, near: ["gone-peer"] });
+  reset({ layouts: { "w1:p1": full } }); await start({ ...launch, near: ["/s/gone-peer.jsonl"] });
   assert.ok(calls().some(c => c[1] === "create") && !calls().some(c => c[1] === "split"));
   reset({ startError: "agent_start_failed" }); await assert.rejects(start(launch), /Startup diagnostics/);
   assert.equal(calls().filter(c => c[1] === "start").length, 1); assert.equal(calls().at(-1)?.[1], "close");
@@ -201,15 +201,16 @@ test("split respects caller geometry/divider; uncertain launch is not repeated o
   assert.equal(calls().some(c => c[1] === "close"), false); assert.equal(calls().filter(c => c[1] === "prompt").length, 1);
 });
 
-test("bundled monitor is discoverable, spawns with its role and verbatim task, and allows trusted overrides", async () => {
+test("monitor is an example, not bundled; once installed it spawns with its role, verbatim task and required tools", async () => {
   const previous = process.env.PI_CODING_AGENT_DIR;
   const global = join(dir, "monitor-global");
-  const project = join(dir, ".pi/agents");
   mkdirSync(join(global, "agents"), { recursive: true });
   process.env.PI_CODING_AGENT_DIR = global;
   reset();
   const h = await harness();
   try {
+    assert.equal(presets(dir, false).some(p => p.name === "monitor"), false, "examples are not loaded");
+    copyFileSync("examples/agents/monitor.md", join(global, "agents/monitor.md"));
     const monitor = presets(dir, false).find(p => p.name === "monitor")!;
     assert.equal(monitor.fields.model, undefined, "inherits the host model");
     const listed = await h.tool("swarm_list");
@@ -220,16 +221,11 @@ test("bundled monitor is discoverable, spawns with its role and verbatim task, a
     assert.equal(record.snapshot.prompt, monitor.body);
     const args = calls().find(c => c[1] === "start")!;
     assert.equal(readFileSync(args[args.indexOf("--append-system-prompt") + 1], "utf8"), monitor.body);
+    assert.deepEqual(record.snapshot.tools, ["codemode"]);
+    assert.equal(args[args.indexOf("--swarm-tools") + 1], "codemode");
     assert.equal(calls().find(c => c[1] === "prompt")!.at(-1), task);
-    writeFileSync(join(global, "agents/monitor.md"), "---\ndescription: user monitor\n---\nUser role");
-    mkdirSync(project, { recursive: true });
-    writeFileSync(join(project, "monitor.md"), "---\ndescription: project monitor\n---\nProject role");
-    assert.equal(presets(dir, false).find(p => p.name === "monitor")?.body, "User role");
-    assert.equal(presets(dir, true).find(p => p.name === "monitor")?.body, "Project role");
-    assert.equal(presets(dir, true).filter(p => p.name === "monitor").length, 1);
   } finally {
     await h.event("session_shutdown", { reason: "reload" });
-    rmSync(join(project, "monitor.md"), { force: true });
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
   }
@@ -251,23 +247,8 @@ test("optional presets snapshot only configuration, respect trust and override o
   assert.equal(selected.model, "openai/gpt-4.1"); assert.equal(selected.thinking, "off");
   const args = loadout(selected, join(dir, "session.jsonl"));
   assert.equal(args.includes("--tools"), false); assert.equal(args.includes("--no-tools"), false);
-  assert.ok(args.includes("-e"));
-  assert.equal(loadout({ ...selected, extensionLoaded: true }, join(dir, "session.jsonl")).includes("-e"), false);
-  mkdirSync(join(dir, ".pi"), { recursive: true });
-  writeFileSync(join(dir, ".pi/settings.json"), JSON.stringify({ packages: ["git:github.com/fyang93/pi-herdr-swarm"] }));
-  writeFileSync(join(global, "trust.json"), JSON.stringify({ [dir]: false }));
-  context.isProjectTrusted = () => true; // spawner is trusted; peer cwd is not
-  const untrustedPeer = await snapshot(undefined, context, "high", {});
-  assert.equal(untrustedPeer.extensionLoaded, false);
-  assert.ok(loadout(untrustedPeer, join(dir, "peer.jsonl")).includes("-e"));
-  // pi reads only <cwd>/.pi/settings.json, not the Git root's, and trust is inherited from the nearest ancestor.
-  writeFileSync(join(global, "trust.json"), JSON.stringify({ [dir]: true }));
-  assert.equal((await snapshot(undefined, context, "high", {})).extensionLoaded, true);
-  const nestedCwd = join(dir, "nested-settings"); mkdirSync(nestedCwd, { recursive: true });
-  const nestedPeer = await snapshot(undefined, { ...context, cwd: nestedCwd }, "high", {});
-  assert.equal(nestedPeer.extensionLoaded, false);
-  assert.ok(loadout(nestedPeer, join(dir, "peer.jsonl")).includes("-e"));
-  rmSync(join(dir, ".pi/settings.json"));
+  // Always this copy; pi loads an identical installed path once (verified against pi's resource loader).
+  assert.deepEqual(args.slice(args.indexOf("-e"), args.indexOf("-e") + 2), ["-e", extensionPath]);
   assert.equal(readFileSync(join(dir, "system.md"), "utf8"), "Project body");
   assert.deepEqual(args.slice(-2), ["--append-system-prompt", join(dir, "system.md")]);
   for (const fields of [{ "session-mode": "fork" }, { cli: "claude" }]) await assert.rejects(snapshot({ ...preset, fields }, context, "high", {}));
@@ -276,13 +257,13 @@ test("optional presets snapshot only configuration, respect trust and override o
 
 test("list does not name the caller; send names it once with a notification", async () => {
   reset({ agents: [{ pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "peer", pane_id: "w1:p2", agent: "pi", cwd: dir }] });
-  const h = await harness({ "swarm-name": "spawner", "swarm-spawner": "parent" });
+  const h = await harness({ "swarm-spawner": "parent" });
   try {
     assert.deepEqual([...h.tools.keys()], ["swarm_spawn", "swarm_send", "swarm_list"]);
     const listed = await h.tool("swarm_list");
     assert.equal(listed.details.presets.length > 0, listed.content[0].text.includes("Presets:"));
-    assert.match(listed.content[0].text, /Self: spawner\nParent: parent/);
-    assert.deepEqual({ self: listed.details.self, parent: listed.details.parent }, { self: "spawner", parent: "parent" });
+    assert.equal(listed.details.self, undefined, "an unnamed caller has no name yet");
+    assert.match(listed.content[0].text, /^Parent: parent\n/, "parent shows without a live name");
     assert.equal(calls().some(c => c[1] === "rename"), false);
     for (const to of ["peer", "*"]) {
       const sent = await h.tool("swarm_send", { to, message: "announcement" });
@@ -292,6 +273,10 @@ test("list does not name the caller; send names it once with a notification", as
     }
     assert.equal(calls().filter(c => c[1] === "rename").length, 1);
     assert.ok(h.notices.some(n => typeof n === "string" && n.includes("This session is now named swarm-w1-p1")));
+    // Self is the live name of the caller's current pane, not a launch flag.
+    const named = await h.tool("swarm_list");
+    assert.match(named.content[0].text, /Self: swarm-w1-p1\nParent: parent/);
+    assert.deepEqual({ self: named.details.self, parent: named.details.parent }, { self: "swarm-w1-p1", parent: "parent" });
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
@@ -319,8 +304,8 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     assert.match(h.tools.get("swarm_send").description, /Call this tool directly, not as a shell command/);
     assert.match(description, /stays running while its task runs, then exits/);
     assert.throws(() => validateToolArguments(h.tools.get("swarm_spawn"), { type: "toolCall", id: "test", name: "swarm_spawn", arguments: { task: "x", detach: true } }), /Validation failed/);
-    assert.match(description, /use swarm_list to discover available presets and select a suitable one with agent/);
-    assert.match(description, /Omit agent only when no preset fits/);
+    assert.match(description, /agent selects a preset from swarm_list/);
+    assert.doesNotMatch(description, /Omit agent only/);
     assert.match(description, /Use swarm_send to communicate/);
     assert.doesNotMatch(description, /meaningful changes|monitoring a state/);
     await assert.rejects(h.tool("swarm_spawn", { agent: "unknown", task: "x" }), /Unknown preset/);

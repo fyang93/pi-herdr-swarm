@@ -1,10 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { mkdirSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 export const MESSAGE_LIMIT = 4000;
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 export function validateName(name: string): string {
@@ -106,7 +105,7 @@ export async function ensurePiIntegration(notify: (message: string) => void): Pr
   const status = String(await herdr(["integration", "status"], 10_000, true).catch(() => ""));
   if (/^pi: current\b/m.test(status)) return;
   try {
-    mkdirSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), "extensions"), { recursive: true });
+    mkdirSync(join(getAgentDir(), "extensions"), { recursive: true });
     await herdr(["integration", "install", "pi"], 30_000, true);
     notify("Installed herdr's pi integration; pi sessions started before this report no session path until restarted.");
   } catch (error) {
@@ -121,10 +120,14 @@ export function availableName(base: string, agents: LiveAgent[], history: Iterab
   const used = new Set([...agents.map(a => a.name), ...history]);
   for (let n = 1; ; n++) { const name = `${base}-${n}`; if (!used.has(name)) return name; }
 }
+/** The caller's pane now: inherited HERDR_PANE_ID/HERDR_WORKSPACE_ID go stale when a pane moves workspace. */
+export async function currentPane(): Promise<{ pane_id: string; workspace_id: string }> {
+  return (await herdr(["pane", "current", "--current"])).pane;
+}
 /** This session's herdr name; an unnamed caller is named after its pane (unique while online), never renamed. */
 export async function identity(named?: (name: string) => void): Promise<string> {
   requireHerdr();
-  const pane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
+  const pane = (await currentPane()).pane_id;
   const own = await get(pane);
   if (!own) throw new Error("herdr does not recognize pi in the caller's pane.");
   if (own.name) return validateName(own.name);
@@ -187,7 +190,7 @@ export interface Launch {
   session?: string;
   resume?: boolean;
   maxAgents?: number;
-  /** Names of the caller's other peers: their panes can be split too once the caller's own is full. */
+  /** Session paths of the caller's other peers: their panes can be split too once the caller's own is full. */
   near?: string[];
   /** Called with the new pane before the agent starts, so the spawn record exists even if start blocks. */
   beforeStart?: (pane: string) => void;
@@ -208,10 +211,12 @@ export function start(launch: Launch): Promise<{ name: string; pane: string }> {
     for (const agent of agents) if (await inProject(agent, target, roots)) count++;
     if (count >= max) throw new Error(`Agent admission refused: ${count}/${max} online in ${target}.`);
     // Split the largest pane, yours or a peer's, that leaves both halves usable; a background tab otherwise.
-    const callerPane = (await herdr(["pane", "current", "--current"])).pane.pane_id;
-    const near = new Set(launch.near ?? []);
+    const caller = await currentPane();
+    // By session, not name: a name of an ended peer may now belong to an unrelated agent.
+    const near = new Set((launch.near ?? []).map(sessionPath));
+    const peers = agents.filter(a => hasSessionPath(a) && near.has(sessionPath(a.agent_session!.value))).map(a => a.pane_id);
     let best: { pane: string; direction: "right" | "down"; area: number } | undefined;
-    for (const candidate of [callerPane, ...agents.filter(a => a.name && near.has(a.name) && a.pane_id).map(a => a.pane_id!)]) {
+    for (const candidate of [caller.pane_id, ...peers]) {
       const { layout } = await herdr(["pane", "layout", "--pane", candidate]);
       const rect = !layout.zoomed && layout.panes.find((p: any) => p.pane_id === candidate)?.rect;
       const direction = rect && splitDirection(rect.width, rect.height);
@@ -219,7 +224,7 @@ export function start(launch: Launch): Promise<{ name: string; pane: string }> {
     }
     const pane: string = best
       ? (await herdr(["pane", "split", best.pane, "--direction", best.direction, "--no-focus", "--cwd", launch.cwd])).pane.pane_id
-      : (await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID!, "--no-focus", "--label", launch.name, "--cwd", launch.cwd])).root_pane.pane_id;
+      : (await herdr(["tab", "create", "--workspace", caller.workspace_id, "--no-focus", "--label", launch.name, "--cwd", launch.cwd])).root_pane.pane_id;
     try {
       launch.beforeStart?.(pane);
       await herdr(["agent", "start", launch.name, "--kind", "pi", "--pane", pane, "--timeout", "60000", "--", ...launch.args], 70_000);

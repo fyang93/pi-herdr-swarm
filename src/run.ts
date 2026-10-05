@@ -45,7 +45,8 @@ export function finalSummary(message: any, session: string): string {
 export function readResult(run: Pick<Run, "name" | "session" | "boundary">) {
   try {
     const reply = lastReply(readSession(run.session), run.boundary);
-    const status = !reply ? "empty" : wasAborted(reply) ? "aborted" : reply.stopReason === "error" ? "error" : "reply";
+    // toolUse: the session ended mid-turn, e.g. its pane was closed during a tool.
+    const status = !reply ? "empty" : wasAborted(reply) ? "aborted" : reply.stopReason === "error" ? "error" : reply.stopReason === "toolUse" ? "incomplete" : "reply";
     return { text: finalSummary(reply, run.session), status };
   } catch (error: any) {
     return { text: `Cannot read session ${run.session}${error.code ? ` [${error.code}]` : ""}: ${String(error)}`, status: "unreadable" };
@@ -149,7 +150,7 @@ export function lifecycle(pi: ExtensionAPI) {
 
   function resultMessage(id: string, run: Run) {
     const result = readResult(run);
-    return { customType: "swarm_result", content: `[swarm result] ${run.name}\nSession: ${run.session}\n${result.text}`, display: true,
+    return { customType: "swarm_result", content: `[swarm result] ${run.name}${result.status === "reply" ? "" : ` · ${result.status}`}\nSession: ${run.session}\n${result.text}`, display: true,
       details: { name: run.name, session: run.session, spawnEntryId: id, status: result.status } };
   }
 

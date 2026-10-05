@@ -85,9 +85,10 @@ export const sendResult: Renderer = (result, options, theme, context) => resultV
 });
 export const listResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { agents: LiveAgent[]; presets: { name: string; description: string; model?: string }[] } | undefined;
+  const data = result.details as { agents: LiveAgent[]; presets: { name: string; description: string; model?: string }[]; self?: string; parent?: string } | undefined;
   if (!data) return textLines(theme.fg("toolOutput", output(result)), width);
-  const lines = textLines(theme.fg("dim", `${data.agents.length} agents · ${data.presets.length} presets`), width);
+  const identity = [data.self && theme.fg("dim", "self ") + theme.fg("accent", data.self), data.parent && theme.fg("dim", "parent ") + theme.fg("accent", data.parent)].filter(Boolean).join(theme.fg("dim", " · "));
+  const lines = [...(identity ? textLines(identity, width) : []), ...textLines(theme.fg("dim", `${data.agents.length} agents · ${data.presets.length} presets`), width)];
   for (const agent of data.agents) lines.push(...textLines(agentRow(agent, theme), width));
   if (data.presets.length) {
     lines.push(...textLines(theme.fg("toolTitle", "Presets"), width));
