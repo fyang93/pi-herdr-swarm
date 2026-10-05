@@ -47,6 +47,17 @@ function peerRun(name: string, spawner: SessionManager): Run {
 }
 const live = (run: Run, status = "working", name: string | undefined = run.name) => ({ name, pane_id: "w1:p19", agent: "pi", agent_status: status, agent_session: { kind: "path", value: run.session } });
 
+test("a spawned peer is told its last reply is its whole result; other sessions are not", async () => {
+  for (const auto of [true, false]) {
+    state(); const r = await runtime(auto); let prompt = "";
+    try {
+      r.faux.setResponses([context => { prompt = JSON.stringify(context.messages.filter(m => (m.role as string) === "system")); return fauxAssistantMessage("done"); }]);
+      await r.session.prompt("task"); await sleep(20);
+      assert.equal(prompt.includes("last reply is delivered to spawner as your result"), auto);
+    } finally { await r.close(); }
+  }
+});
+
 test("exit: settled completion shuts down; manual, error and interrupted outcomes", async () => {
   for (const [auto, reply, expected] of [[false, fauxAssistantMessage("manual"), 0], [true, fauxAssistantMessage("final reply"), 1], [true, fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider unavailable" }), 1], [true, fauxAssistantMessage("stopped", { stopReason: "aborted" }), 0]] as const) {
     state(); const r = await runtime(auto);

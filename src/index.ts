@@ -60,8 +60,14 @@ export default function swarm(pi: ExtensionAPI) {
       requireTools(config.tools ?? [], context);
     } catch (error) { try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
   });
-  pi.on("before_agent_start", event => role ? { systemPrompt: `${event.systemPrompt}\n\n${role}` } : undefined);
   const runState = lifecycle(pi);
+  pi.on("before_agent_start", (event, context) => {
+    const run = runState.deliversTo(context);
+    // The peer cannot see how its run ends otherwise; without this it answers a late message with only an addendum.
+    const delivery = run && `You are ${run.name}, spawned by ${run.spawner}. When you stop with nothing pending, your session ends and your last reply is delivered to ${run.spawner} as your result. Make that reply complete on its own: after answering a later message, restate the whole result, not only what changed.`;
+    const added = [role, delivery].filter(Boolean).join("\n\n");
+    return added ? { systemPrompt: `${event.systemPrompt}\n\n${added}` } : undefined;
+  });
 
   type History = ReturnType<typeof runState.history>;
   /** Restore an ended run of ours: same session and saved configuration; the next reply follows `boundary`. */

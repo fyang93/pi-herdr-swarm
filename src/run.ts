@@ -292,6 +292,8 @@ export function lifecycle(pi: ExtensionAPI) {
       }
       return found;
     },
+    /** Who receives this session's last reply as a result, when swarm launched it on this session. */
+    deliversTo: (context: ExtensionContext) => eligible(context) ? { name: String(flag("name")), spawner: String(flag("spawner")) } : undefined,
     archived: (id: string) => ctx!.sessionManager.getEntries().some(entry => resultId(entry) === id),
     pending: (session: string) => [...pending().values()].some(run => sessionPath(run.session) === sessionPath(session)),
     /** Persist the spawn record before the child is started; it is not supervised until `launched`. */
