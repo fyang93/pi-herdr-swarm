@@ -263,7 +263,6 @@ test("list does not name the caller; send names it once with a notification", as
     const listed = await h.tool("swarm_list");
     assert.equal(listed.details.presets.length > 0, listed.content[0].text.includes("Presets:"));
     assert.equal(listed.details.self, undefined, "an unnamed caller has no name yet");
-    assert.match(listed.content[0].text, /^Parent: parent\n/, "parent shows without a live name");
     assert.equal(calls().some(c => c[1] === "rename"), false);
     for (const to of ["peer", "*"]) {
       const sent = await h.tool("swarm_send", { to, message: "announcement" });
@@ -275,8 +274,8 @@ test("list does not name the caller; send names it once with a notification", as
     assert.ok(h.notices.some(n => typeof n === "string" && n.includes("This session is now named swarm-w1-p1")));
     // Self is the live name of the caller's current pane, not a launch flag.
     const named = await h.tool("swarm_list");
-    assert.match(named.content[0].text, /Self: swarm-w1-p1\nParent: parent/);
-    assert.deepEqual({ self: named.details.self, parent: named.details.parent }, { self: "swarm-w1-p1", parent: "parent" });
+    assert.match(named.content[0].text, /^Self: swarm-w1-p1\n/);
+    assert.equal(named.details.self, "swarm-w1-p1");
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 

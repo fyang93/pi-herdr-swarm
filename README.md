@@ -29,7 +29,7 @@ swarm_list();
 | `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. Select a preset role with `agent`, or describe the role in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
 | `swarm_spawn({resume, task})` | Continues one of your ended runs with its full context and saved configuration. |
 | `swarm_send({message, to})` | Requires `to`. Pushes a message to an exact name (any project) or to every named agent in this project matching a pattern with `*` anywhere. No separate message store. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
-| `swarm_list()` | Your name, parent (when spawned), online agents (name, state, pane), and available presets. |
+| `swarm_list()` | Your name, online agents (name, state, pane), and available presets. |
 
 ## How a run works
 

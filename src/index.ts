@@ -159,7 +159,7 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_list", label: "Swarm list",
-    description: "Show your name, parent (when spawned), online agents, status, panes, and available presets.",
+    description: "Show your name, online agents, status, panes, and available presets.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
       requireHerdr();
@@ -169,9 +169,7 @@ export default function swarm(pi: ExtensionAPI) {
       const presetLines = available.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`);
       const pane = (await currentPane()).pane_id;
       const self = agents.find(a => a.pane_id === pane)?.name;
-      const parent = pi.getFlag("swarm-spawner");
-      const identity = [self && `Self: ${self}`, typeof parent === "string" && `Parent: ${parent}`].filter(Boolean).join("\n");
-      return textResult([identity, agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].filter(Boolean).join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })), self, parent: typeof parent === "string" ? parent : undefined });
+      return textResult([self && `Self: ${self}`, agentLines.join("\n") || "No online agents.", ...(presetLines.length ? ["Presets:", ...presetLines] : [])].filter(Boolean).join("\n\n"), { agents, presets: available.map(p => ({ name: p.name, description: p.description, model: p.fields.model ? String(p.fields.model) : undefined })), self });
     },
     renderCall(_args, theme, context) { return callView(theme.fg("toolTitle", theme.bold("list")) + theme.fg("dim", " · agents + presets"), "", context.expanded, theme); },
     renderResult: listResult,
