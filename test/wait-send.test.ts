@@ -35,6 +35,7 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
     close: async () => { await session.extensionRunner!.emit({ type: "session_shutdown", reason: "reload" }); session.dispose(); } };
 }
 const nativeReply = (from: string, text = "Use option B.", wait = false) => `[swarm message] ${from} → worker${wait ? " (waiting for your reply)" : ""}\n${text}`;
+const resultMessage = (name: string) => ({ customType: "swarm_result", content: `[swarm result] ${name}\nSession: /tmp/${name}\nfinished`, display: true, details: { name, session: `/tmp/${name}`, status: "reply" } });
 const calls = () => readFileSync(join(dir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
 const waitCall = (to: string | string[] = "peer") => fauxAssistantMessage(fauxToolCall("swarm_send", { to, message: "Which option should I use?", wait: true }));
 
@@ -102,6 +103,20 @@ test("unrelated swarm messages do not release a wait, which survives a fresh dis
     assert.equal(calls().filter(args => args[0] === "agent" && args[1] === "prompt").length, 1, "restart must not resend the request");
     assert.deepEqual(restored.errors, []);
   } finally { await restored.close(); }
+});
+
+test("wait:true resumes when an ended recipient returns its swarm_result", async () => {
+  state(["peer"]); let send!: (message: any) => void;
+  const r = await runtime(true, pi => { send = message => pi.sendMessage(message, { triggerTurn: true }); });
+  try {
+    r.faux.setResponses([waitCall(), fauxAssistantMessage("Complete result")]);
+    await r.session.prompt("ask");
+    assert.deepEqual(waitingForReply(r.session.sessionManager), ["peer"]);
+    send(resultMessage("peer"));
+    await r.session.waitForIdle(); await sleep(30);
+    assert.deepEqual(waitingForReply(r.session.sessionManager), []);
+    assert.equal(r.faux.state.callCount, 2); assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
+  } finally { await r.close(); }
 });
 
 test("human input ends a restored wait and allows tool execution", async () => {

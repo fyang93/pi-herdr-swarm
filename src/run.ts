@@ -74,20 +74,21 @@ export function readResult(run: Pick<Run, "name" | "session" | "boundary">) {
 const resultId = (entry: any): string | undefined =>
   entry.type === "custom_message" && entry.customType === "swarm_result" ? entry.details?.spawnEntryId : undefined;
 /** Waiting is reconstructed from this branch's ordinary send results and incoming messages. */
-export function waitingForReply(manager: Pick<SessionManager, "getBranch">): string[] {
+export function waitingForReply(manager: Pick<SessionManager, "getBranch">, incoming: { type: string; customType?: string; details?: unknown }[] = []): string[] {
   const branch = manager.getBranch();
   for (let i = branch.length - 1; i >= 0; i--) {
     const entry = branch[i];
     if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "swarm_send") continue;
     const details = entry.message.details as { wait?: boolean; deliveries?: { to: string; status: string }[] } | undefined;
     if (!details?.wait) continue;
-    const recipients = details.deliveries?.filter(d => d.status === "submitted").map(d => d.to) ?? [];
+    const recipients = details.deliveries?.filter(d => d.status === "submitted" || d.status === "resumed").map(d => d.to) ?? [];
     if (!recipients.length) continue;
     // A reply can be steered while submission is in flight, before its tool result is persisted.
     const toolCallId = entry.message.toolCallId;
     const call = branch.findIndex(e => e.type === "message" && e.message.role === "assistant" && e.message.content.some(c => c.type === "toolCall" && c.id === toolCallId));
-    const replied = branch.slice(call < 0 ? i + 1 : call + 1).some(e => {
-      if (e.type !== "message" || e.message.role !== "user") return false;
+    const replied = [...branch.slice(call < 0 ? i + 1 : call + 1), ...incoming].some(e => {
+      if (e.type === "custom_message" && e.customType === "swarm_result") return recipients.includes((e.details as { name?: string } | undefined)?.name ?? "");
+      if (e.type !== "message" || !("message" in e) || e.message.role !== "user") return false;
       const text = typeof e.message.content === "string" ? e.message.content : e.message.content.filter(c => c.type === "text").map(c => c.text).join("\n");
       const from = /^\[swarm message\] ([a-z][a-z0-9_-]{0,31}) → /.exec(text)?.[1];
       return !text.startsWith("[swarm message]") || !!from && recipients.includes(from);
@@ -224,7 +225,7 @@ export function lifecycle(pi: ExtensionAPI) {
     for (const [index, { type: _type, ...message }] of entries.entries()) {
       if (!active || ctx !== current || !current.isIdle()) break;
       delivery.written.set(message.details.spawnEntryId, undefined);
-      pi.sendMessage(message, { triggerTurn: triggerTurn && !awaitingReply() && index === entries.length - 1 });
+      pi.sendMessage(message, { triggerTurn: triggerTurn && !waitingForReply(current.sessionManager, entries).length && index === entries.length - 1 });
     }
   }
 
@@ -233,7 +234,7 @@ export function lifecycle(pi: ExtensionAPI) {
     const entries = readyResults().filter(entry => !proposed.has(entry.details.spawnEntryId));
     if (!entries.length) return;
     // Keep payloads until pi persists them: later handlers can replace these drafts.
-    return { entries: [...event.entries, ...entries], ...(event.outcome === "completed" && !delivery.cancelled && !awaitingReply() ? { continue: true } : {}) };
+    return { entries: [...event.entries, ...entries], ...(event.outcome === "completed" && !delivery.cancelled && !waitingForReply(ctx!.sessionManager, [...event.entries, ...entries]).length ? { continue: true } : {}) };
   }
 
   function supervise(id: string, run: Run, agents: LiveAgent[]) {
@@ -318,7 +319,7 @@ export function lifecycle(pi: ExtensionAPI) {
   pi.on("agent_start", () => { outcome = undefined; });
   pi.on("turn_end", (event, context) => {
     // Mixed tool batches may contain non-terminating results: still stop after wait:true.
-    if (awaitingReply() && !context.hasPendingMessages()) context.abort();
+    if (waitingForReply(context.sessionManager, [...event.entries, ...readyResults()]).length && !context.hasPendingMessages()) context.abort();
     return resultBoundary(event);
   });
   pi.on("agent_before_settle", event => { outcome = event.outcome; return resultBoundary(event); });

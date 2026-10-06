@@ -82,7 +82,7 @@ try {
   const capped = await invoke("swarm_spawn", { name: "too-many", task: "no launch" }); assert.equal(capped.isError, true);
   assert.equal((await live()).some(a => a.name === "too-many"), false);
   await cli(["agent", "rename", a.pane, "--clear"]); await sleep(2200); assert.equal(results("demo-a").length, 0);
-  assert.equal((await invoke("swarm_spawn", { resume: "demo-a", task: "no duplicate process" })).isError, true);
+  assert.equal((await invoke("swarm_send", { to: "demo-a", message: "no duplicate process" })).isError, true);
   await cli(["agent", "rename", a.pane, "demo-a"]);
   barrier("start");
   const received = (session: string, text: string) => readSession(session).getBranch().some(e => e.type === "message" && e.message.role === "user" && (typeof e.message.content === "string" ? e.message.content : e.message.content.filter(c => c.type === "text").map(c => c.text).join("\n")).includes(text));
@@ -92,17 +92,44 @@ try {
   assert.ok(received(file, "A_GROUP"), "explicit recipients include the spawner");
   console.log("communication: native mutual messages and exact recipient arrays passed");
 
+  // Names are global: another project may claim an ended peer's name, but not its session handle.
+  const otherProject = join(base, "other-project"); mkdirSync(otherProject);
+  const occupiedSession = join(otherProject, "occupied.jsonl");
+  const occupiedPane = (await cli(["tab", "create", "--workspace", workspace!, "--no-focus", "--cwd", otherProject])).root_pane.pane_id;
+  await cli(["agent", "start", "demo-a", "--kind", "pi", "--pane", occupiedPane, "--", "--session", occupiedSession, "-e", resolve("src/index.ts"), "--model", "swarm-e2e/scripted"], 70_000);
+  const occupied = await invoke("swarm_send", { to: "demo-a", message: "PRIVATE_FOLLOWUP", wait: true });
+  assert.equal(occupied.isError, true); assert.equal(occupied.details.wait, false);
+  assert.equal(occupied.details.deliveries[0].code, "session_mismatch");
+  assert.match(occupied.details.deliveries[0].error, /名字已被其他会话占用/);
+  assert.equal(results("demo-a").length, 1);
+  await cli(["agent", "prompt", "demo-a", marker([])]);
+  await wait(() => readSession(occupiedSession).getBranch().some(e => e.type === "message" && e.message.role === "assistant"), "same-name holder processed its own task");
+  await ready("demo-a"); assert.equal(received(occupiedSession, "PRIVATE_FOLLOWUP"), false);
+  await cli(["agent", "prompt", "demo-a", "/e2e-no-reply"]); await ended("demo-a"); await cli(["pane", "close", occupiedPane]);
+  console.log("identity: global same-name holder in another project receives no private follow-up and is not resumed");
+
+  await invoke("swarm_spawn", { name: "mixed-live", task: marker([step("e2e_wait", { file: "mixed-live-finish" })]) });
   const spawnCount = records().length;
-  const rejected = await invoke("swarm_send", { to: ["demo-a", "missing"], message: "follow-up", wait: true });
+  const resumeBoundary = readSession(a.session).getLeafId();
+  const mixed = await invoke("swarm_send", { to: ["mixed-live", "demo-a", "missing"], message: marker([step("e2e_wait", { file: "resumed-finish" })]), wait: true });
+  assert.equal(mixed.isError, true);
+  assert.equal(mixed.details.wait, true);
+  assert.deepEqual(mixed.details.deliveries.map((d: any) => [d.to, d.status, d.code]), [["mixed-live", "submitted", undefined], ["demo-a", "resumed", undefined], ["missing", "rejected", "agent_not_found"]]);
+  assert.equal(records().length, spawnCount + 1);
+  assert.equal(record("demo-a").session, a.session);
+  assert.equal(record("demo-a").boundary, resumeBoundary);
+  const waitingEntries = entries().length;
+  await sleep(1200);
+  assert.equal(entries().slice(waitingEntries).some(e => e.type === "message" && e.message.role === "assistant"), false, "sender stays parked before a reply or result");
+  barrier("resumed-finish"); await finish("demo-a", 2);
+  await wait(() => entries().slice(waitingEntries).some(e => e.type === "message" && e.message.role === "assistant"), "resumed peer result wakes waiting sender");
+  assert.ok((await live()).some(a => a.name === "mixed-live"), "first result resumes sender without waiting for all recipients");
+  barrier("mixed-live-finish"); await finish("mixed-live");
+  const rejected = await invoke("swarm_send", { to: "missing", message: "follow-up", wait: true });
   assert.equal(rejected.isError, true);
   assert.equal(rejected.details.wait, false);
-  assert.deepEqual(rejected.details.deliveries.map((d: any) => [d.to, d.status, d.code]), [["demo-a", "rejected", "agent_not_found"], ["missing", "rejected", "agent_not_found"]]);
-  const resumeHint = 'Peer demo-a has ended; use swarm_spawn({resume: "demo-a", task}) to continue its session.';
-  assert.ok(rejected.details.deliveries[0].error.includes(resumeHint) && rejected.content[0].text.includes(resumeHint));
-  assert.doesNotMatch(rejected.details.deliveries[1].error, /swarm_spawn|has ended/);
-  assert.equal(records().length, spawnCount);
-  assert.equal((await live()).some(a => a.name === "demo-a"), false, "send does not resume an ended peer");
-  console.log("communication: ended own peer gets an explicit resume hint; unknown recipient stays unchanged");
+  assert.equal(rejected.details.deliveries[0].code, "agent_not_found");
+  console.log("communication: mixed live/ended/missing recipients, automatic same-session resume and result-based wait wake passed");
 
   await invoke("swarm_spawn", { name: "wait-peer", task: marker([step("swarm_send", { to: "demo-spawner", message: "WAIT_QUESTION", wait: true })]) });
   await wait(() => received(file, "WAIT_QUESTION"), "ordinary waiting message");
@@ -148,11 +175,8 @@ try {
   barrier("monitor-stop"); await finish("monitor");
   console.log("monitoring: updates arrive during the task; stop returns one result and closes the peer");
   const boundary = readSession(a.session).getLeafId();
-  await invoke("swarm_spawn", { resume: "demo-a", task: marker([]) }); await finish("demo-a", 2);
+  assert.equal((await invoke("swarm_send", { to: "demo-a", message: marker([]) })).details.deliveries[0].status, "resumed"); await finish("demo-a", 3);
   assert.equal(record("demo-a").session, a.session); assert.equal(record("demo-a").boundary, boundary);
-  await invoke("swarm_spawn", { resume: "demo-a", task: "/e2e-no-reply" }); await finish("demo-a", 3);
-  assert.equal((results("demo-a").at(-1) as any).details.status, "empty");
-  assert.match(String((results("demo-a").at(-1) as any).content), /No new reply in this run/);
   console.log("startup/history: consecutive same-session resume passed");
 
   // A manually launched pi on that same session has no internal launch flags.

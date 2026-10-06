@@ -92,17 +92,17 @@ test("collapsed output is bounded by display rows and uses the configured expans
   assert.ok(rendered(result("这是一行很长的中文正文".repeat(150)), true).render(40).length > 8);
 });
 
-test("send distinguishes submitted/rejected/unknown", () => {
+test("send distinguishes submitted/resumed/rejected/unknown", () => {
   const component = rendered(result("wire", { deliveries: [
-    { to: "a", status: "submitted" }, { to: "b", status: "rejected", code: "agent_blocked", error: "herdr agent_blocked: approval dialog" },
-    { to: "c", status: "unknown", code: "timeout", error: "herdr timeout" },
+    { to: "a", status: "submitted" }, { to: "b", status: "resumed" }, { to: "c", status: "rejected", code: "agent_blocked", error: "herdr agent_blocked: approval dialog" },
+    { to: "d", status: "unknown", code: "timeout", error: "herdr timeout" },
   ] }), true, { isError: true }, "swarm_send");
   const lines = component.render(100);
   const output = plain(lines);
-  assert.match(output, /3 recipients · 1 submitted · 1 rejected · 1 unknown/);
-  assert.match(output, /submitted → a/); assert.match(output, /rejected → b \[agent_blocked\]/); assert.match(output, /unknown → c \[timeout\]/);
+  assert.match(output, /4 recipients · 1 submitted · 1 resumed · 1 rejected · 1 unknown/);
+  assert.match(output, /submitted → a/); assert.match(output, /resumed → b/); assert.match(output, /rejected → c \[agent_blocked\]/); assert.match(output, /unknown → d \[timeout\]/);
   assert.match(lines.join(""), /\x1b\[38;5;40m✓ submitted/);
-  assert.match(lines.join(""), /\x1b\[38;5;214m\? unknown/);
+  assert.match(lines.join(""), /\x1b\[38;5;40m✓ resumed/); assert.match(lines.join(""), /\x1b\[38;5;214m\? unknown/);
   assert.match(lines.join(""), /\x1b\[38;5;196mherdr agent_blocked/);
   assert.doesNotMatch(output, /read|acknowledged/, "submission is not acknowledgement");
   const waiting = rendered(result("wire", { deliveries: [{ to: "peer", status: "submitted" }], wait: true }));

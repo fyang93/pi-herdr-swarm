@@ -67,18 +67,19 @@ function resultView(expanded: boolean, partial: boolean, theme: Theme, lines: (w
 
 export const spawnResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   if (context.isError) return textLines(theme.fg("error", output(result)), width);
-  const data = result.details as { name: string; pane: string; resumed?: boolean } | undefined;
-  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}`) : theme.fg("toolOutput", output(result)), width);
+  const data = result.details as { name: string; pane: string } | undefined;
+  return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · started · ${data.pane}`) : theme.fg("toolOutput", output(result)), width);
 });
 export const sendResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
   const data = result.details as { deliveries: Delivery[]; wait?: boolean } | undefined;
   if (!Array.isArray(data?.deliveries)) return textLines(theme.fg(context.isError ? "error" : "toolOutput", output(result)), width);
   const count = (status: Delivery["status"]) => data.deliveries.filter(d => d.status === status).length;
-  const lines = textLines(theme.fg("dim", `${data.deliveries.length} recipients · ${count("submitted")} submitted · ${count("rejected")} rejected · ${count("unknown")} unknown`), width);
+  const lines = textLines(theme.fg("dim", `${data.deliveries.length} recipients · ${count("submitted")} submitted · ${count("resumed")} resumed · ${count("rejected")} rejected · ${count("unknown")} unknown`), width);
   if (data.wait) lines.push(...textLines(theme.fg("warning", "Waiting for reply"), width));
   for (const delivery of data.deliveries) {
-    const color = delivery.status === "submitted" ? "success" : delivery.status === "rejected" ? "error" : "warning";
-    const icon = delivery.status === "submitted" ? "✓" : delivery.status === "rejected" ? "✗" : "?";
+    const success = delivery.status === "submitted" || delivery.status === "resumed";
+    const color = success ? "success" : delivery.status === "rejected" ? "error" : "warning";
+    const icon = success ? "✓" : delivery.status === "rejected" ? "✗" : "?";
     lines.push(...textLines(`${theme.fg(color, `${icon} ${delivery.status}`)} → ${theme.fg("accent", delivery.to)}${delivery.code ? theme.fg("dim", ` [${delivery.code}]`) : ""}`, width));
     if (delivery.error) lines.push(...textLines(theme.fg(color, delivery.error), width));
   }

@@ -285,8 +285,8 @@ test("child policy gates fresh spawns and malformed startup flags fail closed", 
       try {
         await assert.rejects(h.tool("swarm_spawn", { task: "forbidden" }), /denied|can-spawn/i);
         await assert.rejects(h.tool("swarm_spawn", { agent: "policy-executor", name: "named", task: "forbidden" }), /denied|can-spawn/i);
-        await assert.rejects(h.tool("swarm_spawn", { resume: "anything", task: "forbidden" }), /denied|can-spawn/i);
         assert.equal(calls().some(c => c[1] === "start" || c[1] === "split" || c[1] === "create"), false);
+        assert.equal((await h.tool("swarm_send", { to: "peer", message: "live sends remain allowed" })).details.deliveries[0].status, "submitted");
       } finally { await h.event("session_shutdown", { reason: "reload" }); }
     }
     reset(); const unrestricted = await harness({ "swarm-can-spawn": "true" });
@@ -309,10 +309,15 @@ test("child policy gates fresh spawns and malformed startup flags fail closed", 
       child.appendMessage({ role: "user", content: "work", timestamp: Date.now() }); child.appendMessage(fauxAssistantMessage("done"));
       // False blocks resume as well; true restores it regardless of the child's preset.
       flags["swarm-agent"] = "policy-executor"; await h.event("session_start");
-      await assert.rejects(h.tool("swarm_spawn", { resume: "allowed", task: "forbidden resume" }), /denied|can-spawn/i);
+      const denied = await h.tool("swarm_send", { to: "allowed", message: "forbidden resume", wait: true });
+      assert.equal(denied.details.wait, false); assert.equal(denied.terminate, undefined);
+      assert.equal(denied.details.deliveries[0].status, "rejected");
+      assert.match(denied.details.deliveries[0].error, /denied.*can-spawn/i);
+      assert.equal((await h.tool("swarm_send", { to: "spawner", message: "live self" })).details.deliveries[0].code, "self");
       assert.equal(calls().some(c => c[1] === "start"), false);
       flags["swarm-agent"] = "policy-leader"; await h.event("session_start");
-      await h.tool("swarm_spawn", { resume: "allowed", task: "more" });
+      const resumed = await h.tool("swarm_send", { to: "allowed", message: "more" });
+      assert.equal(resumed.details.deliveries[0].status, "resumed");
       assert.equal(calls().find(c => c[1] === "start")!.includes("--swarm-can-spawn"), true);
     } finally { await h.event("session_shutdown", { reason: "reload" }); }
   } finally { for (const file of ["policy-executor.md", "policy-leader.md", "policy-bad.md"]) rmSync(join(agents, file)); }
@@ -428,17 +433,15 @@ test("startup names the caller before any tool; list and send keep that name",  
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
-test("send hints resume only for agent_not_found recipients in this sender's spawn history", async () => {
+test("send resumes only archived ended peers in this sender's history", async () => {
   reset(); const h = await harness();
-  const hint = 'Peer finished has ended; use swarm_spawn({resume: "finished", task}) to continue its session.';
   try {
     const description = h.tools.get("swarm_send").description;
-    assert.match(description, /agent_not_found.*spawn history/);
-    assert.ok(description.includes('swarm_spawn({resume: "<name>", task})'));
-    assert.match(description, /Never resumes or retries automatically; other rejection reasons are unchanged/);
+    assert.match(description, /archived ended peer/);
+    assert.match(description, /can-spawn/);
     await h.tool("swarm_spawn", { name: "finished", task: "work" });
     assert.deepEqual((await h.tool("swarm_send", { to: "finished", message: "still live" })).details.deliveries, [{ to: "finished", status: "submitted" }]);
-    // History, like resume, spans branches and survives session startup; no result archive is needed for a hint.
+    // Spawn history spans branches and session startup; auto-resume additionally requires archived results.
     h.context.sessionManager.resetLeaf(); h.context.sessionManager.appendMessage(fauxAssistantMessage("different branch"));
     await h.event("session_start", { reason: "reload" });
     reset();
@@ -446,18 +449,19 @@ test("send hints resume only for agent_not_found recipients in this sender's spa
     assert.equal(sent.isError, true);
     assert.equal(sent.details.wait, true);
     assert.equal(sent.terminate, true);
-    assert.deepEqual(sent.details.deliveries, [
-      { to: "finished", status: "rejected", code: "agent_not_found", error: `Error: herdr agent_not_found: not online ${hint}` },
+    assert.match(sent.details.deliveries[0].error, /Cannot resume finished/);
+    assert.deepEqual(sent.details.deliveries.map((d: any) => d.to === "finished" ? { ...d, error: "not archived" } : d), [
+      { to: "finished", status: "rejected", code: "agent_not_found", error: "not archived" },
       { to: "peer", status: "submitted" },
       { to: "blocked", status: "rejected", code: "agent_blocked", error: "Error: herdr agent_blocked: prompt failed" },
       { to: "missing", status: "rejected", code: "agent_not_found", error: "Error: herdr agent_not_found: not online" },
       { to: "spawner", status: "rejected", code: "self", error: "cannot message yourself" },
     ]);
-    assert.ok(sent.content[0].text.includes(hint));
-    assert.deepEqual(calls().filter(c => c[1] === "prompt").map(c => c[2]).sort(), ["blocked", "finished", "missing", "peer"]);
-    assert.equal(calls().some(c => ["list", "start", "split", "create"].includes(c[1]) || (c[1] === "get" && c[2] !== "w1:p1")), false, "no recipient discovery, resume or retry");
+    assert.doesNotMatch(sent.content[0].text, /swarm_spawn\(\{resume/);
+    assert.deepEqual(calls().filter(c => c[1] === "prompt").map(c => c[2]).sort(), ["blocked", "missing", "peer"]);
+    assert.equal(calls().some(c => ["start", "split", "create"].includes(c[1])), false, "unarchived peers cannot be restarted");
     for (const code of ["not_found", "agent_blocked", "agent_not_ready", "invalid_params", "unsupported_agent", "timeout", "server_error"]) {
-      reset({ promptError: code });
+      reset({ promptError: code, agents: [...readState().agents.filter((a: any) => a.name !== "finished"), { name: "finished", agent: "pi", pane_id: "w1:p9", cwd: dir, agent_session: { kind: "path", value: h.entries.find(e => e.customType === "swarm_spawn" && e.data.name === "finished").data.session } }] });
       const failed = await h.tool("swarm_send", { to: "finished", message: "no hint for other failures", wait: true });
       assert.deepEqual(failed.details.deliveries, [{ to: "finished", status: ["timeout", "server_error"].includes(code) ? "unknown" : "rejected", code, error: `Error: herdr ${code}: prompt failed` }]);
       assert.equal(failed.details.wait, false);
@@ -467,9 +471,69 @@ test("send hints resume only for agent_not_found recipients in this sender's spa
     }
     reset();
     const ended = await h.tool("swarm_send", { to: "finished", message: "ended", wait: true });
-    assert.ok(ended.details.deliveries[0].error.includes(hint));
+    assert.equal(ended.details.deliveries[0].code, "agent_not_found");
     assert.equal(ended.details.wait, false);
     assert.equal(ended.terminate, undefined);
+    const run = h.entries.find(e => e.customType === "swarm_spawn" && e.data.name === "finished");
+    const child = SessionManager.open(run.data.session);
+    child.appendMessage({ role: "user", content: "task", timestamp: Date.now() }); child.appendMessage(fauxAssistantMessage("done"));
+    h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: run.id });
+    const agents = [{ name: "spawner", agent: "pi", pane_id: "w1:p1", cwd: dir, agent_session: { kind: "path", value: h.context.sessionManager.getSessionFile() } },
+      { name: "peer", agent: "pi", pane_id: "w1:p2", cwd: dir, agent_session: { kind: "path", value: "/live.jsonl" } }];
+    reset({ agents });
+    settings.swarm = { maxAgents: 2 };
+    const capped = await h.tool("swarm_send", { to: "finished", message: "capped", wait: true });
+    assert.equal(capped.details.deliveries[0].status, "rejected"); assert.match(capped.details.deliveries[0].error, /admission refused/);
+    assert.equal(capped.details.wait, false); assert.equal(calls().some(c => c[1] === "start"), false);
+    delete settings.swarm;
+    for (const extra of [{ agents: [...agents, { agent: "pi", pane_id: "w1:p3", cwd: dir }] }, { agents, listError: true }]) {
+      reset(extra);
+      const uncertain = await h.tool("swarm_send", { to: "finished", message: "uncertain" });
+      assert.equal(uncertain.details.deliveries[0].status, "rejected");
+      assert.equal(calls().some(c => c[1] === "start"), false);
+    }
+    reset({ agents });
+    const mixed = await h.tool("swarm_send", { to: ["peer", "finished", "missing"], message: "follow-up", wait: true });
+    assert.deepEqual(mixed.details.deliveries.map((d: any) => [d.to, d.status]), [["peer", "submitted"], ["finished", "resumed"], ["missing", "rejected"]]);
+    assert.equal(mixed.details.wait, true); assert.equal(mixed.terminate, true);
+    assert.equal(calls().filter(c => c[1] === "prompt" && c[2] === "finished").at(-1)![3], "[swarm message] spawner → finished (waiting for your reply)\nfollow-up");
+    const latest = h.entries.filter(e => e.customType === "swarm_spawn" && e.data.name === "finished").at(-1);
+    assert.equal(latest.data.session, run.data.session); assert.equal(latest.data.boundary, child.getLeafId());
+    h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: latest.id });
+    reset({ agents, promptError: "agent_not_found" });
+    const uncertain = await h.tool("swarm_send", { to: "finished", message: "uncertain launch", wait: true });
+    assert.equal(uncertain.details.deliveries[0].status, "unknown");
+    assert.match(uncertain.details.deliveries[0].error, /do not blindly retry/);
+    assert.equal(uncertain.details.wait, false);
+    assert.equal(calls().filter(c => c[1] === "start").length, 1);
+  } finally { delete settings.swarm; await h.event("session_shutdown", { reason: "reload" }); }
+});
+
+test("spawn history binds names to sessions, not global same-name holders in other projects", async () => {
+  reset(); const h = await harness();
+  try {
+    await h.tool("swarm_spawn", { name: "handle", task: "work" });
+    const run = h.entries.find(e => e.customType === "swarm_spawn" && e.data.name === "handle");
+    const own = { name: "spawner", agent: "pi", pane_id: "w1:p1", cwd: dir, agent_session: { kind: "path", value: h.context.sessionManager.getSessionFile() } };
+    const holder = { name: "handle", agent: "pi", pane_id: "w2:p1", cwd: "/other-project", agent_session: { kind: "path", value: "/other-project/session.jsonl" } };
+    // Guard even before archival: a reused name must never receive this run's messages.
+    for (const archived of [false, true]) {
+      if (archived) h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: run.id });
+      reset({ agents: [own, holder, { ...holder, name: "stranger", pane_id: "w2:p2" }] });
+      const sent = await h.tool("swarm_send", { to: ["handle", "stranger"], message: "private follow-up", wait: true });
+      assert.deepEqual(sent.details.deliveries.map((d: any) => [d.to, d.status]), [["handle", "rejected"], ["stranger", "submitted"]]);
+      assert.match(sent.details.deliveries[0].error, /名字已被其他会话占用/);
+      assert.equal(calls().some(c => c[1] === "prompt" && c[2] === "handle" || ["start", "split", "create"].includes(c[1])), false);
+    }
+    reset({ agents: [own, { ...holder, agent_session: undefined }] });
+    const unknown = await h.tool("swarm_send", { to: "handle", message: "unknown binding", wait: true });
+    assert.equal(unknown.details.deliveries[0].code, "session_unknown"); assert.equal(unknown.details.wait, false);
+    assert.equal(calls().some(c => ["prompt", "start"].includes(c[1])), false);
+    reset({ agents: [own, { ...holder, agent_session: { kind: "path", value: run.data.session } }] });
+    const matching = await h.tool("swarm_send", { to: "handle", message: "same session" });
+    assert.equal(matching.details.deliveries[0].status, "submitted");
+    assert.equal(calls().filter(c => c[1] === "prompt" && c[2] === "handle").length, 1);
+    assert.equal(calls().some(c => c[1] === "start"), false);
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
@@ -519,21 +583,21 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "TASK");
     assert.equal(args[args.indexOf("--swarm-name") + 1], "first");
     assert.equal(h.entries.filter(e => e.customType === "swarm_spawn").length, 2);
-    await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use resume explicitly/);
-    await assert.rejects(h.tool("swarm_spawn", { resume: "second", name: "bad", task: "again" }), /resume accepts only/);
+    await assert.rejects(h.tool("swarm_spawn", { name: "first", task: "again" }), /use swarm_send/);
+    assert.throws(() => validateToolArguments(h.tools.get("swarm_spawn"), { type: "toolCall", id: "test", name: "swarm_spawn", arguments: { resume: "second", task: "again" } }), /Validation failed/);
     reset({ agents: [{ name: "spawner", agent: "pi", pane_id: "w1:p1", cwd: dir, agent_session: { kind: "path", value: "/other-session.jsonl" } }] });
-    await assert.rejects(h.tool("swarm_spawn", { resume: "first", task: "again" }), /pending/);
+    assert.match((await h.tool("swarm_send", { to: "first", message: "again" })).details.deliveries[0].error, /pending/);
     h.context.sessionManager.resetLeaf(); h.context.sessionManager.appendMessage(fauxAssistantMessage("different branch"));
-    await assert.rejects(h.tool("swarm_spawn", { resume: "first", task: "again" }), /not archived/);
+    assert.match((await h.tool("swarm_send", { to: "first", message: "again" })).details.deliveries[0].error, /not archived/);
     const second = h.entries.find(e => e.customType === "swarm_spawn" && e.data.name === "second");
     const previous = SessionManager.open(second.data.session);
     previous.appendMessage({ role: "user", content: "TASK", timestamp: Date.now() }); previous.appendMessage(fauxAssistantMessage("done"));
-    await assert.rejects(h.tool("swarm_spawn", { resume: "second", task: "Follow-up task" }), /not archived/);
+    assert.match((await h.tool("swarm_send", { to: "second", message: "Follow-up task" })).details.deliveries[0].error, /not archived/);
     h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: second.id });
-    await h.tool("swarm_spawn", { resume: "second", task: "Follow-up task" });
-    assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "Follow-up task");
+    assert.equal((await h.tool("swarm_send", { to: "second", message: "Follow-up task" })).details.deliveries[0].status, "resumed");
+    assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "[swarm message] spawner → second\nFollow-up task");
     const resumed = calls().filter(c => c[1] === "start").at(-1)!;
-    assert.equal(resumed[resumed.indexOf("--swarm-title") + 1], "peer · Follow-up task");
+    assert.equal(resumed[resumed.indexOf("--swarm-title") + 1], "peer · [swarm message] spawner → second");
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 

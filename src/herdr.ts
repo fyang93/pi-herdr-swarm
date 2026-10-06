@@ -140,15 +140,18 @@ export function summary(text: string): string {
   return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
-export interface Delivery { to: string; status: "submitted" | "rejected" | "unknown"; code?: string; error?: string }
+export interface Delivery { to: string; status: "submitted" | "resumed" | "rejected" | "unknown"; code?: string; error?: string }
 export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
   if (error === undefined) return { status: "submitted" };
   const code = error instanceof HerdrError ? error.code : (error as any)?.code;
   const rejected = ["agent_not_found", "not_found", "agent_blocked", "agent_not_ready", "invalid_params", "unsupported_agent"].includes(code);
   return { status: rejected ? "rejected" : "unknown", code: typeof code === "string" ? code : undefined, error: String(error) };
 }
+export function messageText(from: string, to: string, message: string, wait?: boolean): string {
+  return `[swarm message] ${from} → ${to}${wait ? " (waiting for your reply)" : ""}\n${message}`;
+}
 /** Push to exact names, without discovery or storage. Never replay an uncertain submission. */
-export async function deliver(input: { from: string; to: string | string[]; message: string; wait?: boolean }) {
+export async function deliver(input: { from: string; to: string | string[]; message: string; wait?: boolean; sessions?: ReadonlyMap<string, string> }) {
   const message = checkMessage(input.message);
   const from = validateName(input.from);
   const recipients = Array.isArray(input.to) ? input.to : [input.to];
@@ -158,7 +161,14 @@ export async function deliver(input: { from: string; to: string | string[]; mess
     // It would land as a new user message in the sender's own session; keep notes in context or in a file.
     if (to === input.from) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
     try {
-      await prompt(to, `[swarm message] ${from} → ${to}${input.wait ? " (waiting for your reply)" : ""}\n${message}`);
+      const session = input.sessions?.get(to);
+      if (session) {
+        const owner = await get(to);
+        if (!owner) return { to, status: "rejected", code: "agent_not_found", error: "Peer is offline." };
+        if (!hasSessionPath(owner)) return { to, status: "rejected", code: "session_unknown", error: `Session binding unknown for ${to}; cannot deliver.` };
+        if (sessionPath(owner.agent_session!.value) !== sessionPath(session)) return { to, status: "rejected", code: "session_mismatch", error: `Name ${to} is occupied by another session (名字已被其他会话占用); expected ${session}.` };
+      }
+      await prompt(to, messageText(from, to, message, input.wait));
       return { to, ...deliveryOutcome() };
     } catch (error) { return { to, ...deliveryOutcome(error) }; }
   }));

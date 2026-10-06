@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
 import { setImmediate as nextTick } from "node:timers/promises";
-import { MESSAGE_LIMIT, availableName, currentPane, deliver, checkPiIntegration, sessionBinding, identity, list, projectRoot, reportTitle, requireHerdr, start, summary, validateName } from "./herdr.ts";
+import { MESSAGE_LIMIT, availableName, currentPane, deliver, checkPiIntegration, sessionBinding, identity, list, projectRoot, reportTitle, requireHerdr, start, summary, validateName, messageText } from "./herdr.ts";
 import { loadout, presets, requiredTools, snapshot, spawnPolicy, checkSpawn } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, noticeView, resultMessageView } from "./ui.ts";
@@ -113,21 +113,20 @@ export default function swarm(pi: ExtensionAPI) {
     const run = runState.deliversTo(context);
     // The peer cannot see how its run ends otherwise; without this it answers a late message with only an addendum.
     const delivery = run && `You are ${run.name}, spawned by ${run.spawner}. When you stop with nothing pending, your session ends and your last reply is delivered to ${run.spawner} as your result. Make that reply complete on its own: after answering a later message, restate the whole result, not only what changed.`;
-    const discovery = process.env.HERDR_ENV === "1" && "Use swarm_list to discover your name and other online agents' roles/tasks, status and panes; swarm_send addresses their exact live names. Roles/tasks are herdr pane titles, not a separate registry.";
+    const discovery = process.env.HERDR_ENV === "1" && "Use swarm_list to discover your name and other online agents' roles/tasks, status and panes. Names are session handles: swarm_spawn creates new peers; swarm_send talks to existing names, continuing your archived ended peers when spawning is allowed. Your spawned names stay bound to their saved sessions; another session occupying the same global name is rejected. Roles/tasks are herdr pane titles, not a separate registry.";
     const added = [role, delivery, discovery].filter(Boolean).join("\n\n");
     return added ? { systemPrompt: `${event.systemPrompt}\n\n${added}` } : undefined;
   });
 
   type History = ReturnType<typeof runState.history>;
   /** Restore an ended run of ours: same session and saved configuration; the next reply follows `boundary`. */
-  async function prepareResume(params: { resume?: string; agent?: string; model?: string; cwd?: string; name?: string }, history: History, known: string) {
-    if ([params.agent, params.model, params.cwd, params.name].some(v => v !== undefined)) throw new Error("resume accepts only task.");
-    const previous = history.get(params.resume!);
+  async function prepareResume(peer: string, history: History, known: string) {
+    const previous = history.get(peer);
     const saved = previous?.snapshot;
     if (!previous?.session || !saved?.model || !saved.thinking || !saved.cwd) {
-      throw new Error(`Cannot resume ${params.resume}: snapshot/session/cwd missing. ${known}`);
+      throw new Error(`Cannot resume ${peer}: snapshot/session/cwd missing. ${known}`);
     }
-    const peer = validateName(params.resume!);
+    validateName(peer);
     try {
       const agents = await list();
       if (runState.pending(previous.session) || agents.some(a => a.name === peer) || sessionBinding(agents, previous.session)) {
@@ -145,7 +144,7 @@ export default function swarm(pi: ExtensionAPI) {
     const preset = params.agent === undefined ? undefined : presets(context.cwd, context.isProjectTrusted()).find(p => p.name === params.agent);
     if (params.agent !== undefined && !preset) throw new Error(`Unknown preset ${params.agent}. Use swarm_list.`);
     const peer = validateName(params.name ?? availableName(preset?.name || "peer", await list(), history.keys()));
-    if (history.has(peer)) throw new Error(`${peer} was already spawned; use resume explicitly. ${known}`);
+    if (history.has(peer)) throw new Error(`${peer} was already spawned; use swarm_send to talk to it. ${known}`);
     const config = await snapshot(preset, context, pi.getThinkingLevel(), params);
     const runsDir = join(context.sessionManager.getSessionDir(), "swarm-runs");
     mkdirSync(runsDir, { recursive: true });
@@ -153,10 +152,24 @@ export default function swarm(pi: ExtensionAPI) {
     return { peer, config, session, boundary: null as string | null };
   }
 
+  async function launch(prepared: Awaited<ReturnType<typeof prepareSpawn>>, task: string, spawner: string, history: History, resume = false) {
+    const { peer, config, session, boundary } = prepared;
+    const args = loadout(config, session);
+    args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session, "--swarm-title", `${config.preset || "peer"} · ${summary(task)}`);
+    if (boundary) args.push("--swarm-boundary", boundary);
+    let entry: string | undefined;
+    try {
+      return await start({
+        name: peer, cwd: config.cwd, args, task, session, resume, maxAgents: maxAgents(), near: [...history.values()].map(run => run.session),
+        beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config }); },
+      });
+    } finally { if (entry) runState.launched(entry); }
+  }
+
   pi.registerTool({
     name: "swarm_spawn", label: "Swarm spawn", executionMode: "sequential",
-    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. agent selects a preset from swarm_list. Use swarm_send to communicate during the task. Close its pane to stop it. resume continues one of your ended runs with its context and configuration; only task may accompany it.",
-    parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), resume: Type.Optional(Type.String({ minLength: 1, description: "Name of a peer this session spawned earlier (not a session path)." })), agent: Type.Optional(Type.String({ minLength: 1, description: "Preset name from swarm_list." })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
+    description: "Start a fresh pi peer in a new pane with `task` as its first message, and return immediately. It stays running while its task runs, then exits and returns its final reply. agent selects a preset from swarm_list. Use swarm_send to communicate during the task. Close its pane to stop it. This tool only creates new peers; use swarm_send for existing names.",
+    parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 48_000 }), agent: Type.Optional(Type.String({ minLength: 1, description: "Preset name from swarm_list." })), name: Type.Optional(Type.String()), model: Type.Optional(Type.String({ minLength: 1 })), cwd: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
       projectScope();
@@ -165,47 +178,47 @@ export default function swarm(pi: ExtensionAPI) {
       const history = runState.history();
       const known = `Known names: ${[...history.keys()].join(", ") || "(none)"}`;
       checkSpawn(canSpawn);
-      const { peer, config, session, boundary } = params.resume !== undefined
-        ? await prepareResume(params, history, known)
-        : await prepareSpawn(params, history, known, context);
-      const args = loadout(config, session);
-      args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session, "--swarm-title", `${config.preset || "peer"} · ${summary(params.task)}`);
-      if (boundary) args.push("--swarm-boundary", boundary);
-      let entry: string | undefined;
-      let launched;
-      try {
-        launched = await start({
-          name: peer, cwd: config.cwd, args, task: params.task, session, resume: params.resume !== undefined, maxAgents: maxAgents(), near: [...history.values()].map(run => run.session),
-          beforeStart: pane => { entry = runState.record({ name: peer, pane, session, boundary, snapshot: config }); },
-        });
-      } finally { if (entry) runState.launched(entry); }
-      return textResult(`${peer} ${params.resume ? "resumed" : "started"} in ${launched.pane}. When it ends, its final reply arrives in this session as a single swarm_result message, so you can end this turn now.`, { name: peer, pane: launched.pane, resumed: params.resume !== undefined });
+      const prepared = await prepareSpawn(params, history, known, context);
+      const launched = await launch(prepared, params.task, spawner, history);
+      return textResult(`${prepared.peer} started in ${launched.pane}. When it ends, its final reply arrives in this session as a single swarm_result message, so you can end this turn now.`, { name: prepared.peer, pane: launched.pane });
     },
     renderCall(args, theme, context) {
-      const title = args.resume ? theme.fg("toolTitle", theme.bold("resume ")) + theme.fg("accent", args.resume) : theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "inherited") + theme.fg("dim", " → ") + theme.fg("accent", args.name || "…");
+      const title = theme.fg("toolTitle", theme.bold("spawn ")) + theme.fg("accent", args.agent || "inherited") + theme.fg("dim", " → ") + theme.fg("accent", args.name || "…");
       return callView(title, args.task || "", context.expanded, theme);
     },
     renderResult: spawnResult,
   });
   pi.registerTool({
     name: "swarm_send", label: "Swarm send", executionMode: "sequential",
-    description: "Send a message to named peers. Call this tool directly, not as a shell command. `to` is an exact name or an array of exact names; each recipient's submission result is reported separately. No wildcards or broadcasts. If herdr reports agent_not_found for a peer in your spawn history, its rejection says it has ended and suggests swarm_spawn({resume: \"<name>\", task}) to continue its session. Never resumes or retries automatically; other rejection reasons are unchanged. Set wait:true to stop this turn and keep this session open until a submitted recipient replies with ordinary swarm_send. With multiple recipients, the first reply resumes you. Call directly, not inside scripts, when using wait:true.",
+    description: "Send a message to named peers. Call this tool directly, not as a shell command. `to` is an exact name or an array of exact names; each recipient's submission result is reported separately. No wildcards or broadcasts. For your spawn history, an online name must still bind to that run's session; reject names occupied by another session or with unknown bindings. If herdr reports agent_not_found for your archived ended peer in spawn history, continue its session with this message and report resumed, subject to can-spawn and concurrency limits. Live, pending or unknown run state cannot be resumed; other rejection reasons are unchanged and uncertain submissions are never retried. Set wait:true to stop this turn and keep this session open until a submitted or resumed recipient replies via swarm_send or swarm_result. With multiple recipients, the first reply resumes you. Call directly, not inside scripts, when using wait:true.",
     parameters: Type.Object({ message: Type.String(messageLimit), to: Type.Union([Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9_-]{0,31}$" }), Type.Array(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9_-]{0,31}$" }), { minItems: 1 })]), wait: Type.Optional(Type.Boolean({ description: "Stop and wait for a recipient's reply; do not auto-exit." })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
       if (params.wait && _id.includes("/")) throw new Error("wait:true must be called directly, not from another tool.");
       const from = await name(context);
-      const result = await deliver({ from, to: params.to, message: params.message, wait: params.wait });
       const history = runState.history();
+      const result = await deliver({ from, to: params.to, message: params.message, wait: params.wait, sessions: new Map([...history].map(([name, run]) => [name, run.session])) });
       for (const delivery of result.deliveries) {
         if (delivery.status === "rejected" && delivery.code === "agent_not_found" && history.has(delivery.to)) {
-          delivery.error += ` Peer ${delivery.to} has ended; use swarm_spawn({resume: "${delivery.to}", task}) to continue its session.`;
+          const previous = history.get(delivery.to)!;
+          try {
+            checkSpawn(canSpawn);
+            const prepared = await prepareResume(delivery.to, history, `Known names: ${[...history.keys()].join(", ")}`);
+            await launch(prepared, messageText(from, delivery.to, params.message, params.wait), from, history, true);
+            delivery.status = "resumed";
+            delete delivery.code;
+            delete delivery.error;
+          } catch (error) {
+            // A recorded launch may have submitted its task: retain uncertainty, never replay it.
+            delivery.status = runState.history().get(delivery.to)?.entryId !== previous.entryId ? "unknown" : "rejected";
+            delivery.error = String(error);
+          }
         }
       }
-      const failed = result.deliveries.some(d => d.status !== "submitted");
+      const failed = result.deliveries.some(d => d.status !== "submitted" && d.status !== "resumed");
       const lines = result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`);
-      const wait = !!params.wait && result.deliveries.some(d => d.status === "submitted");
-      return { ...textResult(`${result.deliveries.length} recipients\n${lines.join("\n")}${wait ? "\nStop and wait for a recipient's reply via swarm_send." : ""}`, { ...result, wait }, failed), ...(wait ? { terminate: true } : {}) };
+      const wait = !!params.wait && result.deliveries.some(d => d.status === "submitted" || d.status === "resumed");
+      return { ...textResult(`${result.deliveries.length} recipients\n${lines.join("\n")}${wait ? "\nStop and wait for a recipient's reply via swarm_send or swarm_result." : ""}`, { ...result, wait }, failed), ...(wait ? { terminate: true } : {}) };
     },
     renderCall(args, theme, context) {
       const title = theme.fg("toolTitle", theme.bold("send")) + theme.fg("dim", " → ") + theme.fg("accent", Array.isArray(args.to) ? args.to.join(", ") : args.to || "…") + (args.wait ? theme.fg("dim", " · waiting for reply") : "");
