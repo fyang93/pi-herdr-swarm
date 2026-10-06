@@ -34,7 +34,7 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
   return { session, faux, errors, shutdowns: () => shutdowns,
     close: async () => { await session.extensionRunner!.emit({ type: "session_shutdown", reason: "reload" }); session.dispose(); } };
 }
-const nativeReply = (from: string, text = "Use option B.") => `[swarm message] ${from} → worker\n${text}`;
+const nativeReply = (from: string, text = "Use option B.", wait = false) => `[swarm message] ${from} → worker${wait ? " (waiting for your reply)" : ""}\n${text}`;
 const calls = () => readFileSync(join(dir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
 const waitCall = (to: string | string[] = "peer") => fauxAssistantMessage(fauxToolCall("swarm_send", { to, message: "Which option should I use?", wait: true }));
 
@@ -49,14 +49,14 @@ for (const auto of [true, false]) test(auto ? "wait:true parks a spawned peer af
     assert.deepEqual(waitingForReply(r.session.sessionManager), [target]);
     assert.equal(r.faux.state.callCount, 1); assert.equal(r.session.isIdle, true); assert.equal(r.shutdowns(), 0);
     assert.equal(readResult({ name: "worker", session: r.session.sessionManager.getSessionFile()!, boundary: null }).status, "incomplete", "a parked send is not a final result");
-    assert.ok(calls().some(args => args[0] === "agent" && args[1] === "prompt" && args[2] === target && args.includes(`[swarm message] worker → ${target}\nWhich option should I use?`)));
+    assert.ok(calls().some(args => args[0] === "agent" && args[1] === "prompt" && args[2] === target && args.includes(`[swarm message] worker → ${target} (waiting for your reply)\nWhich option should I use?`)));
     assert.equal(r.session.sessionManager.getEntries().some(e => (e.type === "custom" || e.type === "custom_message") && ["swarm_question", "swarm_wait", "swarm_reply", "swarm_message"].includes(e.customType)), false);
     assert.equal(existsSync(join(r.session.sessionManager.getCwd(), ".pi/swarm")), false);
     r.session.clearQueue(); await r.session.reload(); await sleep(30);
     assert.deepEqual(waitingForReply(r.session.sessionManager), [target]); assert.equal(r.shutdowns(), 0);
     let context = "";
     r.faux.setResponses([c => { context = JSON.stringify(c); return fauxAssistantMessage("Complete result using option B."); }]);
-    await r.session.prompt(nativeReply(target), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
+    await r.session.prompt(nativeReply(target, "Use option B.", auto), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
     assert.match(context, /Use option B/); assert.deepEqual(waitingForReply(r.session.sessionManager), []);
     assert.equal(r.shutdowns(), auto ? 1 : 0); assert.deepEqual(r.errors, []);
   } finally { await r.close(); }
@@ -95,7 +95,7 @@ test("unrelated swarm messages do not release a wait, which survives a fresh dis
     assert.deepEqual(waitingForReply(restored.session.sessionManager), ["peer"]);
     await sleep(30); assert.equal(restored.shutdowns(), 0);
     restored.faux.setResponses([fauxAssistantMessage("still waiting"), fauxAssistantMessage("Complete result using option B.")]);
-    await restored.session.prompt(nativeReply("unrelated"), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
+    await restored.session.prompt(nativeReply("unrelated", "Can you help?", true), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
     assert.deepEqual(waitingForReply(restored.session.sessionManager), ["peer"]); assert.equal(restored.shutdowns(), 0);
     await restored.session.prompt(nativeReply("peer"), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
     assert.deepEqual(waitingForReply(restored.session.sessionManager), []); assert.equal(restored.shutdowns(), 1);
@@ -161,6 +161,7 @@ test("ordinary sends continue normally; failed wait deliveries do not park the s
       r.faux.setResponses([fauxAssistantMessage(fauxToolCall("swarm_send", { to: wait ? "blocked" : "peer", message: "update", ...(wait ? { wait: true } : {}) })), fauxAssistantMessage("done")]);
       await r.session.prompt("send"); await sleep(30);
       assert.deepEqual(waitingForReply(r.session.sessionManager), []);
+      if (!wait) assert.ok(calls().some(args => args[0] === "agent" && args[1] === "prompt" && args.includes("[swarm message] worker → peer\nupdate")), "ordinary sends retain their original header");
       assert.equal(r.faux.state.callCount, 2); assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
     } finally { await r.close(); }
   }

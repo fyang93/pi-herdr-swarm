@@ -131,7 +131,7 @@ export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
   return { status: rejected ? "rejected" : "unknown", code: typeof code === "string" ? code : undefined, error: String(error) };
 }
 /** Push to exact names, without discovery or storage. Never replay an uncertain submission. */
-export async function deliver(input: { from: string; to: string | string[]; message: string }) {
+export async function deliver(input: { from: string; to: string | string[]; message: string; wait?: boolean }) {
   const message = checkMessage(input.message);
   const from = validateName(input.from);
   const recipients = Array.isArray(input.to) ? input.to : [input.to];
@@ -141,7 +141,7 @@ export async function deliver(input: { from: string; to: string | string[]; mess
     // It would land as a new user message in the sender's own session; keep notes in context or in a file.
     if (to === input.from) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
     try {
-      await prompt(to, `[swarm message] ${from} → ${to}\n${message}`);
+      await prompt(to, `[swarm message] ${from} → ${to}${input.wait ? " (waiting for your reply)" : ""}\n${message}`);
       return { to, ...deliveryOutcome() };
     } catch (error) { return { to, ...deliveryOutcome(error) }; }
   }));

@@ -152,7 +152,7 @@ export default function swarm(pi: ExtensionAPI) {
       requireHerdr();
       if (params.wait && _id.includes("/")) throw new Error("wait:true must be called directly, not from another tool.");
       const from = await name(context);
-      const result = await deliver({ from, to: params.to, message: params.message });
+      const result = await deliver({ from, to: params.to, message: params.message, wait: params.wait });
       const failed = result.deliveries.some(d => d.status !== "submitted");
       const lines = result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`);
       const wait = !!params.wait && result.deliveries.some(d => d.status === "submitted");
