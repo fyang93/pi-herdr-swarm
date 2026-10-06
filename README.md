@@ -62,7 +62,7 @@ For script-launched sessions that should finish without a host auto-exit extensi
 pi --swarm-agent reviewer --swarm-exit "Review this change and report findings."
 ```
 
-`--swarm-exit` opts this session into the same settled-task exit and pane closing as a spawned peer. It waits for its peers and outstanding `wait:true` before exiting; errors are also terminal, while aborted turns and editor drafts keep it open. After the initial task starts, non-swarm interactive input or Escape takes over and permanently disables automatic exit for this session (including reload/restart). Incoming swarm messages are not human takeover. Without the flag, starting a preset remains interactive; no spawner or result recipient is implied by the flag. Spawned peers retain their existing completion behavior.
+`--swarm-exit` opts this session into the same settled-task exit and pane closing as a spawned peer. It waits for its peers and outstanding `wait:true` before exiting; errors are also terminal, while aborted turns and editor drafts keep it open. Submitted input, including plain tasks pushed by `herdr agent prompt`, is more work: automatic exit still happens after it settles. Escape cancels the current exit candidate; an unsubmitted editor draft also keeps the pane open. A subsequent submitted task can complete and exit normally. Without the flag, starting a preset remains interactive; no spawner or result recipient is implied by the flag. Spawned peers retain their existing completion behavior.
 
 ```markdown
 ---

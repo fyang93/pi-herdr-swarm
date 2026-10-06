@@ -48,15 +48,15 @@ async function runtime(flags: Record<string, string | boolean> = { "swarm-agent"
   if (internal) for (const [name, value] of Object.entries({ "swarm-name": "worker", "swarm-spawner": "spawner", "swarm-session": sessionManager.getSessionFile()! })) loader.getExtensions().runtime.flagValues.set(name, value);
   const modelRuntime = await ModelRuntime.create({ authPath: join(caseDir, "auth.json"), modelsPath: join(caseDir, "models.json") });
   const { session } = await createAgentSession({ cwd, agentDir: caseDir, model: faux.getModel(), modelRuntime, resourceLoader: loader, settingsManager, sessionManager, sessionStartEvent });
-  let shutdowns = 0; let terminalInput: ((data: string) => unknown) | undefined;
+  let shutdowns = 0; let editor = ""; let terminalInput: ((data: string) => unknown) | undefined;
   const errors: string[] = [];
   await session.bindExtensions({ mode: "tui", shutdownHandler: () => { shutdowns++; }, onError: e => errors.push(e.error),
-    uiContext: { setWidget() {}, setStatus() {}, getEditorText: () => "", notify() {}, onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
-  return { session, faux, errors, loader, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
+    uiContext: { setWidget() {}, setStatus() {}, getEditorText: () => editor, notify() {}, onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
+  return { session, faux, errors, loader, draft: (text: string) => { editor = text; }, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
     close: async (reason: SessionShutdownEvent["reason"] = "reload") => { await session.extensionRunner!.emit({ type: "session_shutdown", reason }); session.dispose(); } };
 }
 function forgetProcessState() {
-  // A fresh process cannot rely on extension globals to remember takeover or waiting.
+  // A fresh process reconstructs waiting from its session, not extension globals.
   for (const key of Object.getOwnPropertySymbols(globalThis)) if (Symbol.keyFor(key)?.startsWith("pi-herdr-swarm/")) delete (globalThis as any)[key];
 }
 
@@ -122,45 +122,65 @@ for (const suffix of ["", " (waiting for your reply)"]) test(`native swarm heade
   } finally { await r.close(); }
 });
 
-test("a plain human follow-up ends waiting but permanently opts standalone sessions out, including restart", async () => {
-  addressed(); const r = await runtime(); let file = "";
+test("plain submitted follow-up ends waiting and still exits after completion", async () => {
+  addressed(); const r = await runtime();
   try {
-    r.faux.setResponses([waitCall(), fauxAssistantMessage("manual completion"), fauxAssistantMessage("later completion")]);
+    r.faux.setResponses([waitCall(), fauxAssistantMessage("follow-up complete")]);
     await r.session.prompt("initial task"); assert.equal(r.shutdowns(), 0);
-    await r.session.prompt("Stop waiting; I am taking over."); await sleep(30);
-    assert.deepEqual(waitingForReply(r.session.sessionManager), []); assert.equal(r.shutdowns(), 0);
-    await r.session.prompt(reply(), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
-    assert.equal(r.shutdowns(), 0); file = r.session.sessionManager.getSessionFile()!; assert.deepEqual(r.errors, []);
+    await r.session.prompt("Stop waiting; process this follow-up task.", { source: "interactive" }); await sleep(30);
+    assert.deepEqual(waitingForReply(r.session.sessionManager), []); assert.equal(r.shutdowns(), 1);
+    assert.equal(r.session.sessionManager.getEntries().some(e => e.type === "custom" && e.customType === "swarm_takeover"), false);
+    assert.deepEqual(r.errors, []);
   } finally { await r.close(); }
-  forgetProcessState(); const restored = await runtime(undefined, SessionManager.open(file));
-  try {
-    restored.faux.setResponses([fauxAssistantMessage("still under human control")]);
-    await restored.session.prompt(reply(), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
-    assert.equal(restored.shutdowns(), 0); assert.deepEqual(restored.errors, []);
-  } finally { await restored.close(); }
 });
 
-test("Escape before settlement opts standalone sessions out persistently, even without a human follow-up", async () => {
+test("Escape keeps the settled session open; the next submitted task still exits", async () => {
   state(); let entered!: () => void; let release!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
   let once = true; const r = await runtime(undefined, undefined, pi => { pi.on("agent_before_settle", async () => { if (once) { once = false; entered(); await hold; } }); });
-  let file = "";
   try {
-    r.faux.setResponses([fauxAssistantMessage("initial completion"), fauxAssistantMessage("swarm follow-up")]);
+    r.faux.setResponses([fauxAssistantMessage("initial completion"), fauxAssistantMessage("follow-up complete")]);
     const task = r.session.prompt("initial task"); await started;
     assert.equal(r.type("\x1b"), undefined); release(); await task; await sleep(30); assert.equal(r.shutdowns(), 0);
-    await r.session.prompt(reply(), { source: "rpc", expandPromptTemplates: false }); await sleep(30); assert.equal(r.shutdowns(), 0);
-    file = r.session.sessionManager.getSessionFile()!; assert.deepEqual(r.errors, []);
+    await r.session.prompt("host follow-up task", { source: "interactive" }); await sleep(30);
+    assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
   } finally { release(); await r.close(); }
-  forgetProcessState(); const restored = await runtime(undefined, SessionManager.open(file));
-  try {
-    restored.faux.setResponses([fauxAssistantMessage("still under human control")]);
-    await restored.session.prompt(reply(), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
-    assert.equal(restored.shutdowns(), 0); assert.deepEqual(restored.errors, []);
-  } finally { await restored.close(); }
 });
 
-test("human steering during the first provider call takes over before any assistant is persisted", async () => {
+test("an unsubmitted editor draft keeps the settled session open", async () => {
+  state(); const r = await runtime();
+  try {
+    r.draft("unfinished instructions");
+    r.faux.setResponses([fauxAssistantMessage("initial completion"), fauxAssistantMessage("follow-up complete")]);
+    await r.session.prompt("initial task"); await sleep(30); assert.equal(r.shutdowns(), 0);
+    r.draft(""); await r.session.prompt("submitted instructions"); await sleep(30);
+    assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
+  } finally { await r.close(); }
+});
+
+test("a herdr-style interactive prompt arriving after settlement completes before exit", async () => {
+  state(); let session!: Awaited<ReturnType<typeof runtime>>["session"];
+  let submitted = false; let followUp: Promise<void> | undefined;
+  let entered!: () => void; let release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
+  const r = await runtime(undefined, undefined, pi => {
+    pi.on("agent_settled", () => {
+      if (!submitted) { submitted = true; followUp = session.prompt("HOST_FOLLOWUP", { source: "interactive" }); }
+    });
+    pi.on("before_agent_start", async event => { if (event.prompt === "HOST_FOLLOWUP") { entered(); await hold; } });
+  }); session = r.session;
+  try {
+    let context = "";
+    r.faux.setResponses([fauxAssistantMessage("initial completion"), c => { context = JSON.stringify(c); return fauxAssistantMessage("host follow-up complete"); }]);
+    const task = session.prompt("initial task"); await started; await sleep(30);
+    assert.equal(r.shutdowns(), 0, "the old exit candidate must not close a queued host task");
+    release(); await task; await followUp; await session.waitForIdle(); await sleep(30);
+    assert.match(context, /HOST_FOLLOWUP/); assert.equal(r.faux.state.callCount, 2);
+    assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
+  } finally { release(); await r.close(); }
+});
+
+test("submitted steering during the first provider call is more work, not permanent takeover", async () => {
   state(); let entered!: () => void; let release!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
   const r = await runtime();
@@ -170,7 +190,7 @@ test("human steering during the first provider call takes over before any assist
     assert.equal(r.session.sessionManager.getBranch().some(e => e.type === "message" && e.message.role === "assistant"), false);
     await r.session.prompt("Actually, I will direct this now.", { source: "interactive", streamingBehavior: "steer" });
     release(); await task; await r.session.waitForIdle(); await sleep(30);
-    assert.equal(r.faux.state.callCount, 2); assert.equal(r.shutdowns(), 0); assert.deepEqual(r.errors, []);
+    assert.equal(r.faux.state.callCount, 2); assert.equal(r.shutdowns(), 1); assert.deepEqual(r.errors, []);
   } finally { release(); await r.close(); }
 });
 

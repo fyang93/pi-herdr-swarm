@@ -107,7 +107,7 @@ export function pendingRuns(manager: Pick<SessionManager, "getBranch" | "getEntr
 }
 
 export function lifecycle(pi: ExtensionAPI) {
-  pi.registerFlag("swarm-exit", { type: "boolean", description: "Exit and close this pane when the task settles; human input or Escape takes over." });
+  pi.registerFlag("swarm-exit", { type: "boolean", description: "Exit and close this pane when the task settles; Escape or an editor draft keeps it open." });
   for (const name of ["name", "spawner", "session", "boundary"]) pi.registerFlag(`swarm-${name}`, { type: "string", description: `Internal swarm launch ${name}.` });
   const flag = (name: string) => pi.getFlag(`swarm-${name}`);
 
@@ -122,7 +122,6 @@ export function lifecycle(pi: ExtensionAPI) {
   let exitTick: ReturnType<typeof setTimeout> | undefined;
   let finished = false;
   let exitSession: string | undefined;
-  let agentStarted = false;
   // Process-local supervision state; everything durable is derived from the session.
   const launching = new Set<string>();
   // A message awaits a safe boundary; undefined means it has already been submitted to pi.
@@ -146,10 +145,6 @@ export function lifecycle(pi: ExtensionAPI) {
     if (eligible(context)) return true;
     return flag("exit") === true && exitSession === (context.sessionManager.getSessionFile() ?? context.sessionManager.getSessionId())
       && !context.sessionManager.getEntries().some(entry => entry.type === "custom" && entry.customType === "swarm_takeover");
-  }
-
-  function takeOver() {
-    if (flag("exit") === true && ctx && !eligible(ctx) && autoExitEligible(ctx)) pi.appendEntry("swarm_takeover", {});
   }
 
   /** Supervision trouble is shown once in the status line (not as repeated notices) and cleared on recovery. */
@@ -269,7 +264,6 @@ export function lifecycle(pi: ExtensionAPI) {
     active = true;
     finished = false;
     outcome = undefined;
-    agentStarted = context.sessionManager.getBranch().some(entry => entry.type === "message" && entry.message.role === "assistant");
     launching.clear();
     // Reload does not discard pi's deferred sends; retain their ownership and cancellation, not an extra receipt.
     const session = context.sessionManager.getSessionFile() ?? context.sessionManager.getSessionId();
@@ -282,7 +276,7 @@ export function lifecycle(pi: ExtensionAPI) {
     waitingPeers.clear();
     (globalThis as any)[PENDING_COUNT_KEY] = pendingCount;
     if (context.mode === "tui") stopWatchingKeys = context.ui.onTerminalInput(data => {
-      if (getKeybindings().matches(data, "app.interrupt")) { takeOver(); delivery.cancelled = true; cancelExit(); }
+      if (getKeybindings().matches(data, "app.interrupt")) { delivery.cancelled = true; cancelExit(); }
       return undefined; // observe only
     });
     widget();
@@ -291,11 +285,7 @@ export function lifecycle(pi: ExtensionAPI) {
       pollTimer.unref();
     }
   });
-  pi.on("input", event => {
-    if (agentStarted && event.source === "interactive" && !event.text.startsWith("[swarm message]")) takeOver();
-    delivery.cancelled = false;
-    cancelExit();
-  });
+  pi.on("input", () => { delivery.cancelled = false; cancelExit(); });
   pi.on("tool_call", () => awaitingReply() ? { block: true, terminate: true, reason: "Waiting for a reply; stop here." } : undefined);
   pi.on("message_start", (event, context) => {
     cancelExit();
@@ -305,7 +295,7 @@ export function lifecycle(pi: ExtensionAPI) {
       if (id && delivery.written.has(id)) context.abort();
     }
   });
-  pi.on("agent_start", () => { agentStarted = true; outcome = undefined; });
+  pi.on("agent_start", () => { outcome = undefined; });
   pi.on("turn_end", (event, context) => {
     // Mixed tool batches may contain non-terminating results: still stop after wait:true.
     if (awaitingReply() && !context.hasPendingMessages()) context.abort();

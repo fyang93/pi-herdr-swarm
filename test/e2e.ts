@@ -95,10 +95,10 @@ try {
   await wait(() => received(file, "SCRIPT_WAIT"), "script waiting message");
   await ready("script-runner"); await sleep(1200);
   assert.ok((await live()).some(a => a.name === "script-runner"), "script role stays online while waiting");
-  await invoke("swarm_send", { to: "script-runner", message: "SCRIPT_REPLY" });
+  await cli(["agent", "prompt", "script-runner", marker([])]);
   await ended("script-runner");
   await wait(async () => { try { await cli(["pane", "get", scriptPane]); return false; } catch { return true; } }, "script pane closed after exit");
-  console.log("script roles: preset plus --swarm-exit waits for reply, then exits and closes its own pane");
+  console.log("script roles: settled --swarm-exit session handles a plain herdr follow-up, then exits and closes its pane");
 
   await invoke("swarm_spawn", { name: "monitor", task: marker([step("e2e_wait", { file: "monitor-change" }), step("swarm_send", { to: "demo-spawner", message: "MONITOR_CHANGE" }), step("e2e_wait", { file: "monitor-stop" })]) });
   assert.ok((await live()).some(a => a.name === "monitor"), "a running monitor stays online");
