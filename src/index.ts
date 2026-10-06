@@ -189,13 +189,19 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_send", label: "Swarm send", executionMode: "sequential",
-    description: "Send a message to named peers. Call this tool directly, not as a shell command. `to` is an exact name or an array of exact names; each recipient's submission result is reported separately. No wildcards or broadcasts. Set wait:true to stop this turn and keep this session open until a submitted recipient replies with ordinary swarm_send. With multiple recipients, the first reply resumes you. Call directly, not inside scripts, when using wait:true.",
+    description: "Send a message to named peers. Call this tool directly, not as a shell command. `to` is an exact name or an array of exact names; each recipient's submission result is reported separately. No wildcards or broadcasts. If herdr reports agent_not_found for a peer in your spawn history, its rejection says it has ended and suggests swarm_spawn({resume: \"<name>\", task}) to continue its session. Never resumes or retries automatically; other rejection reasons are unchanged. Set wait:true to stop this turn and keep this session open until a submitted recipient replies with ordinary swarm_send. With multiple recipients, the first reply resumes you. Call directly, not inside scripts, when using wait:true.",
     parameters: Type.Object({ message: Type.String(messageLimit), to: Type.Union([Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9_-]{0,31}$" }), Type.Array(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9_-]{0,31}$" }), { minItems: 1 })]), wait: Type.Optional(Type.Boolean({ description: "Stop and wait for a recipient's reply; do not auto-exit." })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
       if (params.wait && _id.includes("/")) throw new Error("wait:true must be called directly, not from another tool.");
       const from = await name(context);
       const result = await deliver({ from, to: params.to, message: params.message, wait: params.wait });
+      const history = runState.history();
+      for (const delivery of result.deliveries) {
+        if (delivery.status === "rejected" && delivery.code === "agent_not_found" && history.has(delivery.to)) {
+          delivery.error += ` Peer ${delivery.to} has ended; use swarm_spawn({resume: "${delivery.to}", task}) to continue its session.`;
+        }
+      }
       const failed = result.deliveries.some(d => d.status !== "submitted");
       const lines = result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`);
       const wait = !!params.wait && result.deliveries.some(d => d.status === "submitted");

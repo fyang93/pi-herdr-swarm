@@ -92,6 +92,18 @@ try {
   assert.ok(received(file, "A_GROUP"), "explicit recipients include the spawner");
   console.log("communication: native mutual messages and exact recipient arrays passed");
 
+  const spawnCount = records().length;
+  const rejected = await invoke("swarm_send", { to: ["demo-a", "missing"], message: "follow-up", wait: true });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.details.wait, false);
+  assert.deepEqual(rejected.details.deliveries.map((d: any) => [d.to, d.status, d.code]), [["demo-a", "rejected", "agent_not_found"], ["missing", "rejected", "agent_not_found"]]);
+  const resumeHint = 'Peer demo-a has ended; use swarm_spawn({resume: "demo-a", task}) to continue its session.';
+  assert.ok(rejected.details.deliveries[0].error.includes(resumeHint) && rejected.content[0].text.includes(resumeHint));
+  assert.doesNotMatch(rejected.details.deliveries[1].error, /swarm_spawn|has ended/);
+  assert.equal(records().length, spawnCount);
+  assert.equal((await live()).some(a => a.name === "demo-a"), false, "send does not resume an ended peer");
+  console.log("communication: ended own peer gets an explicit resume hint; unknown recipient stays unchanged");
+
   await invoke("swarm_spawn", { name: "wait-peer", task: marker([step("swarm_send", { to: "demo-spawner", message: "WAIT_QUESTION", wait: true })]) });
   await wait(() => received(file, "WAIT_QUESTION"), "ordinary waiting message");
   await ready("wait-peer"); await sleep(1200);

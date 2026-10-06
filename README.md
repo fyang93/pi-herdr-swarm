@@ -28,7 +28,7 @@ swarm_list();
 |---|---|
 | `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. Select a preset role with `agent`, or describe the role in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
 | `swarm_spawn({resume, task})` | Continues one of your ended runs with its full context and saved configuration. |
-| `swarm_send({message, to, wait?})` | Requires `to`: an exact name or a nonempty array of exact names (any project). No wildcards, recipient discovery, or broadcast. No separate message store. Reports each recipient as `submitted`, `rejected` or `unknown`; never retries; never starts a process. |
+| `swarm_send({message, to, wait?})` | Requires `to`: an exact name or a nonempty array of exact names (any project). No wildcards, recipient discovery, or broadcast. No separate message store. Reports each recipient as `submitted`, `rejected` or `unknown`. An `agent_not_found` rejection for a peer in your spawn history says it has ended and suggests `swarm_spawn({resume: "<name>", task})` to continue its session. Other rejection reasons are unchanged; never retries or automatically resumes; never starts a process. |
 | `swarm_list()` | Your name, online agents (`name · role/task · state · pane` when a pane title exists), and available presets. |
 
 ## Online identity

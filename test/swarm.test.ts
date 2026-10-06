@@ -428,6 +428,51 @@ test("startup names the caller before any tool; list and send keep that name",  
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 
+test("send hints resume only for agent_not_found recipients in this sender's spawn history", async () => {
+  reset(); const h = await harness();
+  const hint = 'Peer finished has ended; use swarm_spawn({resume: "finished", task}) to continue its session.';
+  try {
+    const description = h.tools.get("swarm_send").description;
+    assert.match(description, /agent_not_found.*spawn history/);
+    assert.ok(description.includes('swarm_spawn({resume: "<name>", task})'));
+    assert.match(description, /Never resumes or retries automatically; other rejection reasons are unchanged/);
+    await h.tool("swarm_spawn", { name: "finished", task: "work" });
+    assert.deepEqual((await h.tool("swarm_send", { to: "finished", message: "still live" })).details.deliveries, [{ to: "finished", status: "submitted" }]);
+    // History, like resume, spans branches and survives session startup; no result archive is needed for a hint.
+    h.context.sessionManager.resetLeaf(); h.context.sessionManager.appendMessage(fauxAssistantMessage("different branch"));
+    await h.event("session_start", { reason: "reload" });
+    reset();
+    const sent = await h.tool("swarm_send", { to: ["finished", "peer", "blocked", "missing", "spawner", "finished"], message: "follow-up", wait: true });
+    assert.equal(sent.isError, true);
+    assert.equal(sent.details.wait, true);
+    assert.equal(sent.terminate, true);
+    assert.deepEqual(sent.details.deliveries, [
+      { to: "finished", status: "rejected", code: "agent_not_found", error: `Error: herdr agent_not_found: not online ${hint}` },
+      { to: "peer", status: "submitted" },
+      { to: "blocked", status: "rejected", code: "agent_blocked", error: "Error: herdr agent_blocked: prompt failed" },
+      { to: "missing", status: "rejected", code: "agent_not_found", error: "Error: herdr agent_not_found: not online" },
+      { to: "spawner", status: "rejected", code: "self", error: "cannot message yourself" },
+    ]);
+    assert.ok(sent.content[0].text.includes(hint));
+    assert.deepEqual(calls().filter(c => c[1] === "prompt").map(c => c[2]).sort(), ["blocked", "finished", "missing", "peer"]);
+    assert.equal(calls().some(c => ["list", "start", "split", "create"].includes(c[1]) || (c[1] === "get" && c[2] !== "w1:p1")), false, "no recipient discovery, resume or retry");
+    for (const code of ["not_found", "agent_blocked", "agent_not_ready", "invalid_params", "unsupported_agent", "timeout", "server_error"]) {
+      reset({ promptError: code });
+      const failed = await h.tool("swarm_send", { to: "finished", message: "no hint for other failures", wait: true });
+      assert.deepEqual(failed.details.deliveries, [{ to: "finished", status: ["timeout", "server_error"].includes(code) ? "unknown" : "rejected", code, error: `Error: herdr ${code}: prompt failed` }]);
+      assert.equal(failed.details.wait, false);
+      assert.equal(failed.terminate, undefined);
+      assert.equal(calls().filter(c => c[1] === "prompt").length, 1);
+      assert.equal(calls().some(c => ["start", "split", "create"].includes(c[1])), false);
+    }
+    reset();
+    const ended = await h.tool("swarm_send", { to: "finished", message: "ended", wait: true });
+    assert.ok(ended.details.deliveries[0].error.includes(hint));
+    assert.equal(ended.details.wait, false);
+    assert.equal(ended.terminate, undefined);
+  } finally { await h.event("session_shutdown", { reason: "reload" }); }
+});
+
 test("send schema requires a recipient and bounded message; sending requires herdr", async () => {
   reset(); const h = await harness();
   const validate = (args: any) => validateToolArguments(h.tools.get("swarm_send"), { type: "toolCall", id: "test", name: "swarm_send", arguments: args });
