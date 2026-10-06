@@ -79,7 +79,7 @@ test("a mixed tool batch stops after wait:true without later side effects or a d
   } finally { await r.close(); }
 });
 
-test("only an addressed recipient's native reply releases a wait, which survives a fresh disk-backed restart", async () => {
+test("unrelated swarm messages do not release a wait, which survives a fresh disk-backed restart", async () => {
   state(); const r = await runtime(true); let file = "";
   try {
     r.faux.setResponses([waitCall(), fauxAssistantMessage("unexpected continuation")]);
@@ -94,15 +94,36 @@ test("only an addressed recipient's native reply releases a wait, which survives
   try {
     assert.deepEqual(waitingForReply(restored.session.sessionManager), ["peer"]);
     await sleep(30); assert.equal(restored.shutdowns(), 0);
-    restored.faux.setResponses([fauxAssistantMessage("still waiting"), fauxAssistantMessage("still waiting"), fauxAssistantMessage("Complete result using option B.")]);
-    for (const input of ["ordinary user input", nativeReply("unrelated")]) {
-      await restored.session.prompt(input, { source: "rpc", expandPromptTemplates: false }); await sleep(30);
-      assert.deepEqual(waitingForReply(restored.session.sessionManager), ["peer"]); assert.equal(restored.shutdowns(), 0);
-    }
+    restored.faux.setResponses([fauxAssistantMessage("still waiting"), fauxAssistantMessage("Complete result using option B.")]);
+    await restored.session.prompt(nativeReply("unrelated"), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
+    assert.deepEqual(waitingForReply(restored.session.sessionManager), ["peer"]); assert.equal(restored.shutdowns(), 0);
     await restored.session.prompt(nativeReply("peer"), { source: "rpc", expandPromptTemplates: false }); await sleep(30);
     assert.deepEqual(waitingForReply(restored.session.sessionManager), []); assert.equal(restored.shutdowns(), 1);
     assert.equal(calls().filter(args => args[0] === "agent" && args[1] === "prompt").length, 1, "restart must not resend the request");
     assert.deepEqual(restored.errors, []);
+  } finally { await restored.close(); }
+});
+
+test("human input ends a restored wait and allows tool execution", async () => {
+  state(); const r = await runtime(true); let file = "";
+  try {
+    r.faux.setResponses([waitCall()]);
+    await r.session.prompt("ask"); file = r.session.sessionManager.getSessionFile()!;
+    assert.deepEqual(waitingForReply(r.session.sessionManager), ["peer"]);
+  } finally { await r.close(); }
+  const restored = await runtime(true, undefined, SessionManager.open(file));
+  const output = join(restored.session.sessionManager.getCwd(), "human-takeover.txt");
+  try {
+    assert.deepEqual(waitingForReply(restored.session.sessionManager), ["peer"]);
+    restored.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("write", { path: output, content: "human took over" })),
+      fauxAssistantMessage("done"),
+    ]);
+    await restored.session.prompt("Stop waiting; write the file now."); await sleep(30);
+    assert.deepEqual(waitingForReply(restored.session.sessionManager), []);
+    assert.equal(readFileSync(output, "utf8"), "human took over");
+    assert.equal((globalThis as any)[Symbol.for("pi-herdr-swarm/pending-count")](), 0);
+    assert.equal(restored.shutdowns(), 1); assert.deepEqual(restored.errors, []);
   } finally { await restored.close(); }
 });
 

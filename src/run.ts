@@ -74,7 +74,7 @@ export function waitingForReply(manager: Pick<SessionManager, "getBranch">): str
       if (e.type !== "message" || e.message.role !== "user") return false;
       const text = typeof e.message.content === "string" ? e.message.content : e.message.content.filter(c => c.type === "text").map(c => c.text).join("\n");
       const from = /^\[swarm message\] ([a-z][a-z0-9_-]{0,31}) → /.exec(text)?.[1];
-      return !!from && recipients.includes(from);
+      return !text.startsWith("[swarm message]") || !!from && recipients.includes(from);
     });
     return replied ? [] : recipients;
   }
