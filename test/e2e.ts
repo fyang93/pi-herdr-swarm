@@ -23,6 +23,8 @@ async function wait<T>(get: () => T | Promise<T>, label: string, timeout = 90_00
 const base = mkdtempSync(join(tmpdir(), "swarm-e2e-")); const dir = join(base, "project"); const agentDir = join(base, "agent");
 mkdirSync(dir); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 copyFileSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), "extensions/herdr-agent-state.ts"), join(agentDir, "extensions/herdr-agent-state.ts"));
+mkdirSync(join(agentDir, "agents"), { recursive: true });
+writeFileSync(join(agentDir, "agents/script-runner.md"), "---\nmodel: swarm-e2e/scripted\nthinking: off\ncan-spawn: true\n---\nRun the scripted task.");
 writeFileSync(join(agentDir, "extensions/demo.ts"), `export {default} from ${JSON.stringify(resolve("test/e2e-peer.ts"))};`);
 writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off", swarm: { maxAgents: 3 } }));
 const file = join(dir, "spawner.jsonl");
@@ -86,6 +88,17 @@ try {
   await invoke("swarm_send", { to: "wait-peer", message: "WAIT_ANSWER" });
   await finish("wait-peer");
   console.log("waiting: ordinary native send parks a peer; ordinary reply resumes and returns its result");
+
+  const scriptPane = (await cli(["tab", "create", "--workspace", workspace!, "--no-focus", "--cwd", dir])).root_pane.pane_id;
+  await cli(["agent", "start", "script-runner", "--kind", "pi", "--pane", scriptPane, "--", "--session", join(dir, "script.jsonl"), "-e", resolve("src/index.ts"), "--swarm-agent", "script-runner", "--swarm-exit"], 70_000);
+  await cli(["agent", "prompt", "script-runner", marker([step("swarm_send", { to: "demo-spawner", message: "SCRIPT_WAIT", wait: true })])]);
+  await wait(() => received(file, "SCRIPT_WAIT"), "script waiting message");
+  await ready("script-runner"); await sleep(1200);
+  assert.ok((await live()).some(a => a.name === "script-runner"), "script role stays online while waiting");
+  await invoke("swarm_send", { to: "script-runner", message: "SCRIPT_REPLY" });
+  await ended("script-runner");
+  await wait(async () => { try { await cli(["pane", "get", scriptPane]); return false; } catch { return true; } }, "script pane closed after exit");
+  console.log("script roles: preset plus --swarm-exit waits for reply, then exits and closes its own pane");
 
   await invoke("swarm_spawn", { name: "monitor", task: marker([step("e2e_wait", { file: "monitor-change" }), step("swarm_send", { to: "demo-spawner", message: "MONITOR_CHANGE" }), step("e2e_wait", { file: "monitor-stop" })]) });
   assert.ok((await live()).some(a => a.name === "monitor"), "a running monitor stays online");

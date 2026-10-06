@@ -54,14 +54,22 @@ For multiple recipients, pass their exact names as an array to `swarm_send`. Mes
 
 ## Presets
 
-Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, `requires-tools`, `can-spawn`, and a body that is appended to the peer's system prompt (its role and rules). Trusted project presets override user presets of the same name. Pi loads tools, extensions and skills as usual. `can-spawn` is an extension-enforced allowlist of exact preset names: omit it for unrestricted spawning, use `[]` to forbid delegation, or `[researcher, reviewer]` to allow only those presets. A restricted role cannot bypass the allowlist by spawning without `agent` or by resuming a disallowed role. The policy is saved for resumed peers and also applied by `pi --swarm-agent <name>`; malformed policy fails closed. `requires-tools` lists already registered tools the role depends on (`[codemode]`; a single name or comma-separated string also works); the peer activates them, and reports a missing one rather than installing it. Without a preset, a peer inherits your current model and thinking. To start a session as a preset outside `swarm_spawn` (say, from a script), run `pi --swarm-agent <name>`; it applies the model, thinking, role and required tools, while `cwd` applies only when spawning.
+Optional configuration in `~/.pi/agent/agents/*.md` or a trusted project's `.pi/agents/*.md`: `description`, `model`, `thinking`, `cwd`, `requires-tools`, `can-spawn`, and a body that is appended to the peer's system prompt (its role and rules). Trusted project presets override user presets of the same name. Pi loads tools, extensions and skills as usual. `can-spawn` is an extension-enforced boolean, default `true`: `false` forbids all `swarm_spawn` calls, including peers without a preset and resumes. `true` permits delegation to any preset or an ad-hoc peer. The policy is saved for resumed peers and also applied by `pi --swarm-agent <name>`; malformed policy fails closed. `requires-tools` lists already registered tools the role depends on (`[codemode]`; a single name or comma-separated string also works); the peer activates them, and reports a missing one rather than installing it. Without a preset, a peer inherits your current model and thinking. To start a session as a preset outside `swarm_spawn` (say, from a script), run `pi --swarm-agent <name>`; it applies the model, thinking, role and required tools, while `cwd` applies only when spawning.
+
+For script-launched sessions that should finish without a host auto-exit extension:
+
+```sh
+pi --swarm-agent reviewer --swarm-exit "Review this change and report findings."
+```
+
+`--swarm-exit` opts this session into the same settled-task exit and pane closing as a spawned peer. It waits for its peers and outstanding `wait:true` before exiting; errors are also terminal, while aborted turns and editor drafts keep it open. After the initial task starts, non-swarm interactive input or Escape takes over and permanently disables automatic exit for this session (including reload/restart). Incoming swarm messages are not human takeover. Without the flag, starting a preset remains interactive; no spawner or result recipient is implied by the flag. Spawned peers retain their existing completion behavior.
 
 ```markdown
 ---
 name: reviewer
 description: Careful code review
 thinking: high
-can-spawn: []
+can-spawn: false
 ---
 Report actionable findings with file paths.
 ```

@@ -249,62 +249,64 @@ test("optional presets snapshot only configuration, respect trust and override o
   delete process.env.PI_CODING_AGENT_DIR;
 });
 
-test("spawn policy is strict, snapshots persist preset identity and child policy, and resume uses saved identity", async () => {
-  assert.equal(spawnPolicy(undefined), undefined);
-  assert.deepEqual(spawnPolicy([]), []);
-  assert.deepEqual(spawnPolicy(["Executor.v2", "Executor.v2"]), ["Executor.v2"]);
-  for (const value of [null, "executor", "", false, {}, [null], [1], [""], [" executor "], ["*"]]) {
-    assert.throws(() => spawnPolicy(value), /can-spawn/);
-    assert.throws(() => checkSpawn(value, "executor"), /can-spawn/);
-  }
-  checkSpawn(undefined); checkSpawn(undefined, "anything"); checkSpawn(["executor"], "executor");
-  for (const policy of [[], ["executor"]]) {
-    assert.throws(() => checkSpawn(policy), /denied/i);
-    assert.throws(() => checkSpawn(policy, "other"), /denied/i);
-  }
+test("boolean spawn policy defaults true and survives snapshot/loadout", async () => {
+  assert.equal(spawnPolicy(undefined), true);
+  assert.equal(spawnPolicy(true), true);
+  assert.equal(spawnPolicy(false), false);
+  checkSpawn(undefined); checkSpawn(true);
+  assert.throws(() => checkSpawn(false), /denied/i);
   const context: any = { cwd: dir, model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1")] } };
-  const preset = { name: "executor", description: "", body: "Role", fields: { "can-spawn": [] } };
-  const config = await snapshot(preset, context, "off", {});
-  const saved = JSON.parse(JSON.stringify(config));
-  assert.equal(saved.preset, "executor"); assert.deepEqual(saved.canSpawn, []);
-  checkSpawn(["executor"], saved.preset);
-  assert.throws(() => checkSpawn(["other"], saved.preset), /denied/i);
+  const preset = { name: "executor", description: "", body: "Role", fields: { "can-spawn": false } };
+  const saved = JSON.parse(JSON.stringify(await snapshot(preset, context, "off", {})));
+  assert.equal(saved.preset, "executor"); assert.equal(saved.canSpawn, false);
   const args = loadout(saved, join(dir, "session.jsonl"));
-  assert.equal(args[args.indexOf("--swarm-can-spawn") + 1], "[]");
+  assert.equal(args[args.indexOf("--swarm-can-spawn") + 1], "false");
   assert.equal(args.includes("--swarm-agent"), false);
-  assert.equal(loadout(await snapshot(undefined, context, "off", {}), join(dir, "session.jsonl")).includes("--swarm-can-spawn"), false);
-  for (const value of [null, "executor", [false]]) await assert.rejects(snapshot({ ...preset, fields: { "can-spawn": value } }, context, "off", {}), /can-spawn/);
+  const unrestricted = await snapshot(undefined, context, "off", {});
+  assert.equal(unrestricted.canSpawn, true);
+  assert.equal(loadout(unrestricted, join(dir, "session.jsonl")).includes("--swarm-can-spawn"), false);
+  for (const value of [null, "true", "false", "executor", "", {}, [], ["executor"], 0, 1]) {
+    assert.throws(() => spawnPolicy(value), /can-spawn/);
+    assert.throws(() => checkSpawn(value), /can-spawn/);
+    assert.throws(() => loadout({ ...saved, canSpawn: value as any }, join(dir, "session.jsonl")), /can-spawn/);
+    await assert.rejects(snapshot({ ...preset, fields: { "can-spawn": value } }, context, "off", {}), /can-spawn/);
+  }
 });
 
 test("child policy gates fresh spawns and malformed startup flags fail closed", async () => {
   const agents = join(dir, ".pi/agents"); mkdirSync(agents, { recursive: true });
-  writeFileSync(join(agents, "policy-executor.md"), "---\nname: policy-executor\ncan-spawn: []\n---\nExecutor role");
-  writeFileSync(join(agents, "policy-leader.md"), "---\nname: policy-leader\ncan-spawn: [policy-executor]\n---\nLeader role");
+  writeFileSync(join(agents, "policy-executor.md"), "---\nname: policy-executor\ncan-spawn: false\n---\nExecutor role");
+  writeFileSync(join(agents, "policy-leader.md"), "---\nname: policy-leader\ncan-spawn: true\n---\nLeader role");
+  writeFileSync(join(agents, "policy-bad.md"), "---\nname: policy-bad\ncan-spawn: [policy-executor]\n---\nBad role");
   try {
-    for (const flags of [{ "swarm-can-spawn": "[]" }, { "swarm-can-spawn": "null" }, { "swarm-can-spawn": "garbage" }, { "swarm-can-spawn": "{}" }, { "swarm-can-spawn": '[1]' }, { "swarm-agent": "policy-executor" }, { "swarm-agent": "missing-role" }]) {
+    for (const flags of [{ "swarm-can-spawn": "false" }, { "swarm-can-spawn": "[]" }, { "swarm-can-spawn": "null" }, { "swarm-can-spawn": "garbage" }, { "swarm-can-spawn": "{}" }, { "swarm-can-spawn": '[1]' }, { "swarm-agent": "policy-executor" }, { "swarm-agent": "policy-bad" }, { "swarm-agent": "missing-role" }]) {
       reset(); const h = await harness(flags);
       try {
         await assert.rejects(h.tool("swarm_spawn", { task: "forbidden" }), /denied|can-spawn/i);
-        await assert.rejects(h.tool("swarm_spawn", { agent: "policy-executor", task: "forbidden" }), /denied|can-spawn/i);
+        await assert.rejects(h.tool("swarm_spawn", { agent: "policy-executor", name: "named", task: "forbidden" }), /denied|can-spawn/i);
+        await assert.rejects(h.tool("swarm_spawn", { resume: "anything", task: "forbidden" }), /denied|can-spawn/i);
         assert.equal(calls().some(c => c[1] === "start" || c[1] === "split" || c[1] === "create"), false);
       } finally { await h.event("session_shutdown", { reason: "reload" }); }
     }
+    reset(); const unrestricted = await harness({ "swarm-can-spawn": "true" });
+    try { await unrestricted.tool("swarm_spawn", { task: "no preset required" }); }
+    finally { await unrestricted.event("session_shutdown", { reason: "reload" }); }
     reset(); const flags = { "swarm-agent": "policy-leader" }; const h = await harness(flags);
     try {
-      await assert.rejects(h.tool("swarm_spawn", { task: "unpreset" }), /denied|can-spawn/i);
-      await assert.rejects(h.tool("swarm_spawn", { agent: "policy-leader", task: "wrong" }), /denied|can-spawn/i);
+      await h.tool("swarm_spawn", { name: "unpreset", task: "any peer" });
+      await h.tool("swarm_spawn", { agent: "policy-leader", task: "same role peer" });
       await h.tool("swarm_spawn", { agent: "policy-executor", name: "allowed", task: "work" });
-      const run = h.entries.find(e => e.customType === "swarm_spawn");
+      const run = h.entries.find(e => e.customType === "swarm_spawn" && e.data.name === "allowed");
       assert.equal(run.data.snapshot.preset, "policy-executor");
-      assert.deepEqual(run.data.snapshot.canSpawn, []);
-      const args = calls().find(c => c[1] === "start")!;
-      assert.equal(args[args.indexOf("--swarm-can-spawn") + 1], "[]");
+      assert.equal(run.data.snapshot.canSpawn, false);
+      const args = calls().filter(c => c[1] === "start").at(-1)!;
+      assert.equal(args[args.indexOf("--swarm-can-spawn") + 1], "false");
       h.context.sessionManager.resetLeaf(); h.context.sessionManager.appendMessage(fauxAssistantMessage("new branch"));
       reset({ agents: [{ name: "spawner", agent: "pi", pane_id: "w1:p1", cwd: dir, agent_session: { kind: "path", value: "/parent-session.jsonl" } }] });
       h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: run.id });
       const child = SessionManager.open(run.data.session);
       child.appendMessage({ role: "user", content: "work", timestamp: Date.now() }); child.appendMessage(fauxAssistantMessage("done"));
-      // A changed caller role denies resume; restoring it authorizes the saved preset, not peer name `allowed`.
+      // False blocks resume as well; true restores it regardless of the child's preset.
       flags["swarm-agent"] = "policy-executor"; await h.event("session_start");
       await assert.rejects(h.tool("swarm_spawn", { resume: "allowed", task: "forbidden resume" }), /denied|can-spawn/i);
       assert.equal(calls().some(c => c[1] === "start"), false);
@@ -312,7 +314,7 @@ test("child policy gates fresh spawns and malformed startup flags fail closed", 
       await h.tool("swarm_spawn", { resume: "allowed", task: "more" });
       assert.equal(calls().find(c => c[1] === "start")!.includes("--swarm-can-spawn"), true);
     } finally { await h.event("session_shutdown", { reason: "reload" }); }
-  } finally { rmSync(join(agents, "policy-executor.md")); rmSync(join(agents, "policy-leader.md")); }
+  } finally { for (const file of ["policy-executor.md", "policy-leader.md", "policy-bad.md"]) rmSync(join(agents, file)); }
 });
 
 test("list does not name the caller; send names it once with a notification", async () => {

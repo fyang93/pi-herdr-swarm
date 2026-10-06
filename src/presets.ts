@@ -9,20 +9,15 @@ export const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url
 export interface Preset { name: string; description: string; body: string; fields: Record<string, unknown> }
 /** Resolved launch configuration, saved in the spawn record for resume. `prompt` is appended to pi's system prompt. */
 /** `tools` are activated in the peer when registered; they add to pi's tools and never restrict them. */
-export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string; tools?: string[]; preset?: string; canSpawn?: string[] }
-/** Absent policy is unrestricted; only an explicit list of exact preset IDs is accepted. */
-export function spawnPolicy(value: unknown): string[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.some(name => typeof name !== "string" || !name.trim() || name !== name.trim() || name.includes("*"))) {
-    throw new Error("can-spawn must be a list of exact preset names (or [] to deny all).");
-  }
-  return [...new Set(value)];
+export interface Snapshot { cwd: string; model: string; thinking: string; prompt?: string; tools?: string[]; preset?: string; canSpawn?: boolean }
+/** Spawning is allowed by default; only explicit booleans are accepted. */
+export function spawnPolicy(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== "boolean") throw new Error("can-spawn must be true or false.");
+  return value;
 }
-export function checkSpawn(policy: unknown, presetName?: string): void {
-  const allowed = spawnPolicy(policy);
-  if (allowed !== undefined && (presetName === undefined || !allowed.includes(presetName))) {
-    throw new Error(`Spawn denied by can-spawn policy: ${presetName ?? "unpreset peer"}.`);
-  }
+export function checkSpawn(policy: unknown): void {
+  if (!spawnPolicy(policy)) throw new Error("Spawn denied by can-spawn policy.");
 }
 /** A preset's `requires-tools`: a YAML list (`[codemode]`), a name, or a comma-separated string. */
 export function requiredTools(value: unknown): string[] {
@@ -61,7 +56,7 @@ export function loadout(config: Snapshot, session: string): string[] {
   // Always this copy: pi loads an identical path once, so an installed package is not loaded twice.
   const args = ["--session", session, "-e", extensionPath, "--model", config.model, "--thinking", config.thinking];
   const policy = spawnPolicy(config.canSpawn);
-  if (policy !== undefined) args.push("--swarm-can-spawn", JSON.stringify(policy));
+  if (!policy) args.push("--swarm-can-spawn", JSON.stringify(policy));
   if (config.tools?.length) args.push("--swarm-tools", config.tools.join(","));
   if (config.prompt) {
     const path = join(dirname(session), "system.md");

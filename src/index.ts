@@ -31,9 +31,9 @@ export default function swarm(pi: ExtensionAPI) {
   // `pi --swarm-agent <preset>` starts any session as that preset, e.g. when a host launches it outside swarm_spawn.
   pi.registerFlag("swarm-agent", { type: "string", description: "Start this session as a swarm preset: its model, thinking and role." });
   pi.registerFlag("swarm-tools", { type: "string", description: "Internal: tools a swarm preset requires, activated at session start." });
-  pi.registerFlag("swarm-can-spawn", { type: "string", description: "Internal: saved preset spawn allowlist (JSON)." });
+  pi.registerFlag("swarm-can-spawn", { type: "string", description: "Internal: saved preset spawn permission (JSON boolean)." });
   let role: string | undefined;
-  let canSpawn: string[] | undefined;
+  let canSpawn = true;
   /** Activate a preset's required tools; one that does not become active (unregistered, hidden) is reported, not fatal. */
   function requireTools(names: string[], context: ExtensionContext) {
     const add = names.filter(name => !pi.getActiveTools().includes(name));
@@ -47,24 +47,24 @@ export default function swarm(pi: ExtensionAPI) {
     void checkPiIntegration(message => context.ui.notify(message, "warning"));
     project = await projectRoot(context.cwd);
     role = undefined;
-    canSpawn = undefined;
+    canSpawn = true;
     const agent = pi.getFlag("swarm-agent");
     const policy = pi.getFlag("swarm-can-spawn");
-    if (policy !== undefined || (typeof agent === "string" && agent)) canSpawn = []; // fail closed on invalid role configuration
+    if (policy !== undefined || (typeof agent === "string" && agent)) canSpawn = false; // fail closed on invalid role configuration
     try {
       if (policy !== undefined) canSpawn = spawnPolicy(JSON.parse(String(policy)));
       if (typeof agent !== "string" || !agent) return;
       const preset = presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent);
       if (!preset) throw new Error(`no preset named ${agent}`);
       const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
-      canSpawn = config.canSpawn;
+      canSpawn = config.canSpawn ?? true;
       const [provider, ...id] = config.model.split("/");
       const model = context.modelRegistry.find(provider, id.join("/"));
       if (!model || !await pi.setModel(model)) throw new Error(`model ${config.model} unavailable`);
       pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
       role = config.prompt;
       requireTools(config.tools ?? [], context);
-    } catch (error) { canSpawn = []; try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
+    } catch (error) { canSpawn = false; try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
   });
   const runState = lifecycle(pi);
   pi.on("before_agent_start", (event, context) => {
@@ -121,7 +121,7 @@ export default function swarm(pi: ExtensionAPI) {
       const spawner = await name(context);
       const history = runState.history();
       const known = `Known names: ${[...history.keys()].join(", ") || "(none)"}`;
-      checkSpawn(canSpawn, params.resume !== undefined ? history.get(params.resume)?.snapshot.preset : params.agent);
+      checkSpawn(canSpawn);
       const { peer, config, session, boundary } = params.resume !== undefined
         ? await prepareResume(params, history, known)
         : await prepareSpawn(params, history, known, context);
