@@ -8,7 +8,7 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-work
 import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
-import { readSession, readResult, lastReply, wasAborted, pendingRuns, type Run } from "../src/run.ts";
+import { readSession, readResult, lastReply, wasAborted, pendingRuns, currentTool, type Run } from "../src/run.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-runtime-"));
 Object.assign(process.env, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1", HERDR_BIN_PATH: resolve("test/fake-herdr.cjs"), FAKE_HERDR_DIR: dir });
@@ -54,8 +54,57 @@ test("a spawned peer is told its last reply is its whole result; other sessions 
       r.faux.setResponses([context => { prompt = JSON.stringify(context.messages.filter(m => (m.role as string) === "system")); return fauxAssistantMessage("done"); }]);
       await r.session.prompt("task"); await sleep(20);
       assert.equal(prompt.includes("last reply is delivered to spawner as your result"), auto);
+      assert.match(prompt, /Use swarm_list to discover your name and other online agents' roles\/tasks/);
     } finally { await r.close(); }
   }
+});
+
+test("currentTool reads unfinished calls by id on the active session branch, not completed or abandoned calls", () => {
+  const manager = spawnerSession();
+  const idle = manager.getLeafId()!;
+  const bash = fauxToolCall("bash", { command: "sleep 10" });
+  const read = fauxToolCall("read", { path: "README.md" });
+  manager.appendMessage(fauxAssistantMessage([bash, read]));
+  const file = manager.getSessionFile()!;
+  const current = () => currentTool(readSession(file));
+  const result = (call: typeof bash) => manager.appendMessage({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: "done" }], isError: false, timestamp: Date.now() });
+  assert.equal(current(), "read");
+  result(read); assert.equal(current(), "bash", "a result for one parallel call does not hide another");
+  result(bash); assert.equal(current(), undefined);
+  manager.appendMessage(fauxAssistantMessage(fauxToolCall("write", { path: "x", content: "y" })));
+  assert.equal(current(), "write");
+  manager.branch(idle); manager.appendMessage(fauxAssistantMessage("other branch"));
+  assert.equal(current(), undefined);
+  manager.appendMessage(fauxAssistantMessage(fauxToolCall("bash", { command: "old interrupted call" })));
+  manager.appendMessage({ role: "user", content: "new task", timestamp: Date.now() });
+  assert.equal(current(), undefined, "new input does not inherit a stale tool");
+});
+
+test("running widget refreshes elapsed/tool/status each second and vanishes when the peer ends", async () => {
+  const spawner = spawnerSession(); const run = peerRun("widget-peer", spawner);
+  const child = SessionManager.open(run.session);
+  const bash = fauxToolCall("bash", { command: "sleep 10" });
+  child.appendMessage(fauxAssistantMessage(bash));
+  state([live(run)]);
+  const r = await runtime(false, undefined, spawner);
+  try {
+    await sleep(1250);
+    const first = r.waiting();
+    assert.match(first, /\d+:\d{2}\s+widget-peer\s+working · bash/);
+    child.appendMessage({ role: "toolResult", toolCallId: bash.id, toolName: "bash", content: [{ type: "text", text: "done" }], isError: false, timestamp: Date.now() });
+    child.appendMessage(fauxAssistantMessage(fauxToolCall("read", { path: "README.md" })));
+    await sleep(1200);
+    assert.match(r.waiting(), /working · read/); assert.notEqual(r.waiting().match(/\d+:\d{2}/)?.[0], first.match(/\d+:\d{2}/)?.[0]);
+    const valid = readFileSync(run.session, "utf8"); writeFileSync(run.session, "{broken");
+    await sleep(1200);
+    assert.match(r.waiting(), /working/); assert.doesNotMatch(r.waiting(), / · read/, "unreadable session removes a stale tool");
+    writeFileSync(run.session, valid);
+    state([live(run, "idle")]); await sleep(1200);
+    assert.match(r.waiting(), /idle/); assert.doesNotMatch(r.waiting(), / · read/);
+    r.faux.setResponses([fauxAssistantMessage("processed")]); state();
+    await sleep(1250); await r.session.waitForIdle();
+    assert.equal(r.waiting(), ""); assert.deepEqual(r.errors, []);
+  } finally { await r.close(); }
 });
 
 test("exit: settled completion shuts down; manual, error and interrupted outcomes", async () => {
@@ -65,7 +114,7 @@ test("exit: settled completion shuts down; manual, error and interrupted outcome
       assert.equal(r.session.thinkingLevel, "off"); assert.ok(r.session.getActiveToolNames().includes("swarm_spawn"));
       r.faux.setResponses([reply]); await r.session.prompt("task"); await sleep(20); assert.equal(r.shutdowns(), expected);
       assert.equal(existsSync(join(r.session.sessionManager.getCwd(), ".pi/swarm")), false, "completion creates no shared storage");
-      assert.equal(readFileSync(join(dir, "calls.jsonl"), "utf8"), ""); assert.deepEqual(r.errors, []);
+      assert.doesNotMatch(readFileSync(join(dir, "calls.jsonl"), "utf8"), /"close"|"report-metadata"/); assert.deepEqual(r.errors, []);
     } finally { await r.close(); }
   }
 });

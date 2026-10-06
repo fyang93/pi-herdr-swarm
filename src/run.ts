@@ -27,6 +27,22 @@ export function lastReply(manager: Pick<SessionManager, "getBranch">, boundary: 
   return entry?.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
 }
 
+/** Latest still-unfinished call on the active branch, including partially completed tool batches. */
+export function currentTool(manager: Pick<SessionManager, "getBranch">): string | undefined {
+  const completed = new Set<string>();
+  for (const entry of [...manager.getBranch()].reverse()) {
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role === "toolResult") completed.add(message.toolCallId);
+    else if (message.role === "user") return undefined;
+    else if (message.role === "assistant") {
+      const call = [...message.content].reverse().find(part => part.type === "toolCall" && !completed.has(part.id));
+      return call?.type === "toolCall" ? call.name : undefined;
+    }
+  }
+  return undefined;
+}
+
 export function wasAborted(message: any): boolean {
   if (message?.stopReason === "aborted") return true;
   return message?.stopReason === "error" && /operation was aborted|AbortError/i.test(String(message.errorMessage ?? ""));
@@ -128,7 +144,7 @@ export function lifecycle(pi: ExtensionAPI) {
   let delivery = { written: new Map<string, ReturnType<typeof resultMessage> | undefined>(), cancelled: false, exitSession: undefined as string | undefined };
   const awaitingReply = () => !!ctx && waitingForReply(ctx.sessionManager).length > 0;
   const blocked = new Set<string>();
-  const waitingPeers = new Map<string, string[]>();
+  const activity = new Map<string, { status: string; tool?: string; pane?: string }>();
 
   const pending = () => pendingRuns(ctx!.sessionManager);
   const pendingCount = () => ctx ? pendingRuns(ctx.sessionManager, true).size + Number(awaitingReply()) : 0;
@@ -156,9 +172,8 @@ export function lifecycle(pi: ExtensionAPI) {
     if (ctx?.mode !== "tui") return;
     // Only peers still running: collected results await a safe boundary, even if not yet answered.
     const waiting = [...pending()].filter(([id]) => !delivery.written.has(id));
-    const agents = waiting.map(([id, run]) => ({ name: run.name, agent: run.snapshot.preset, pane: run.pane, status: waitingPeers.get(id)?.length ? `waiting for reply: ${waitingPeers.get(id)!.join(", ")}` : blocked.has(id) ? "blocked" : "running" }));
-    const recipients = waitingForReply(ctx.sessionManager);
-    if (recipients.length) agents.unshift({ name: String(flag("name") || "self"), agent: undefined, pane: "", status: `waiting for reply: ${recipients.join(", ")}` });
+    const entries = new Map(ctx.sessionManager.getEntries().map(entry => [entry.id, entry]));
+    const agents = waiting.map(([id, run]) => ({ name: run.name, agent: run.snapshot.preset, started: entries.get(id)?.timestamp, pane: run.pane, status: "starting", ...activity.get(id) }));
     ctx.ui.setWidget("swarm", agents.length ? (_tui, theme) => runningView(agents, theme) : undefined);
   }
 
@@ -224,7 +239,12 @@ export function lifecycle(pi: ExtensionAPI) {
   function supervise(id: string, run: Run, agents: LiveAgent[]) {
     const agent = sessionBinding(agents, run.session); // throws while bindings are uncertain: keep waiting
     if (!agent) return archive(id, run);
-    waitingPeers.set(id, waitingForReply(readSession(run.session)));
+    const view = { pane: agent.pane_id, status: agent.agent_status || "unknown", tool: undefined as string | undefined };
+    activity.set(id, view); // a missing/unreadable session must not leave a stale tool on screen
+    const manager = readSession(run.session);
+    const recipients = waitingForReply(manager);
+    if (recipients.length) view.status = `waiting for reply: ${recipients.join(", ")}`;
+    if (view.status === "working") view.tool = currentTool(manager);
     if (agent.agent_status !== "blocked") return void blocked.delete(id);
     if (!blocked.has(id)) pi.sendMessage({ customType: "swarm_notice", content: `${run.name} is blocked in pane ${agent.pane_id}.`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
     blocked.add(id);
@@ -273,7 +293,7 @@ export function lifecycle(pi: ExtensionAPI) {
     (globalThis as any)[DELIVERY_KEY] = { session, state: delivery };
     if (flag("exit") === true && !eligible(context) && ["new", "resume", "fork"].includes(event.reason)) pi.appendEntry("swarm_takeover", {});
     blocked.clear();
-    waitingPeers.clear();
+    activity.clear();
     (globalThis as any)[PENDING_COUNT_KEY] = pendingCount;
     if (context.mode === "tui") stopWatchingKeys = context.ui.onTerminalInput(data => {
       if (getKeybindings().matches(data, "app.interrupt")) { delivery.cancelled = true; cancelExit(); }
@@ -281,7 +301,7 @@ export function lifecycle(pi: ExtensionAPI) {
     });
     widget();
     if (process.env.HERDR_ENV === "1") {
-      pollTimer = setInterval(() => { if (pending().size) void poll(); }, 1000);
+      pollTimer = setInterval(() => { widget(); if (pending().size) void poll(); }, 1000);
       pollTimer.unref();
     }
   });

@@ -23,14 +23,15 @@ export function callView(title: string, body: string, expanded: boolean, theme: 
   };
 }
 
-export function agentRow(agent: Pick<LiveAgent, "name" | "pane_id" | "agent_status">, theme: Theme): string {
+export function agentRow(agent: Pick<LiveAgent, "name" | "title" | "pane_id" | "agent_status">, theme: Theme): string {
   const status = agent.agent_status || "unknown";
   const color = status === "working" ? "accent" : ["idle", "done"].includes(status) ? "dim" : "warning";
   const icon = status === "working" ? "●" : ["idle", "done"].includes(status) ? "○" : "⚠";
-  return `${theme.fg("accent", theme.bold(agent.name || "(unnamed)"))}  ${theme.fg(color, `${icon} ${status}`)}  ${theme.fg("dim", agent.pane_id)}`;
+  const separator = agent.title ? " · " : "  ";
+  return `${theme.fg("accent", theme.bold(agent.name || "(unnamed)"))}${agent.title ? theme.fg("dim", ` · ${agent.title}`) : ""}${separator}${theme.fg(color, `${icon} ${status}`)}${separator}${theme.fg("dim", agent.pane_id)}`;
 }
 
-export function runningView(agents: { name: string; agent?: string; pane?: string; status?: string }[], theme: Theme): Component {
+export function runningView(agents: { name: string; agent?: string; pane?: string; status?: string; tool?: string; started?: string }[], theme: Theme, now = Date.now()): Component {
   return {
     invalidate() {},
     render(width) {
@@ -44,8 +45,10 @@ export function runningView(agents: { name: string; agent?: string; pane?: strin
       for (const agent of agents) {
         const status = agent.status || "starting";
         const color = ["blocked", "waiting", "waiting for reply"].includes(status) ? "warning" : ["working", "running"].includes(status) ? "accent" : "dim";
-        const right = ` ${theme.fg(color, status)} `;
-        const left = truncateToWidth(` ${theme.bold(agent.name)}${agent.agent && agent.agent !== agent.name ? ` (${agent.agent})` : ""}`, Math.max(0, inner - visibleWidth(right)));
+        const right = ` ${theme.fg(color, status)}${status === "working" && agent.tool ? ` · ${agent.tool}` : ""} `;
+        const seconds = Math.max(0, Math.floor((now - Date.parse(agent.started || "")) / 1000)) || 0;
+        const clock = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+        const left = truncateToWidth(` ${theme.fg("dim", clock)}  ${theme.bold(agent.name)}${agent.agent && agent.agent !== agent.name ? ` (${agent.agent})` : ""}`, Math.max(0, inner - visibleWidth(right)));
         const row = truncateToWidth(left + " ".repeat(Math.max(0, inner - visibleWidth(left) - visibleWidth(right))) + right, inner);
         lines.push(border("│") + row + " ".repeat(Math.max(0, inner - visibleWidth(row))) + border("│"));
       }

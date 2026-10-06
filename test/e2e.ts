@@ -6,6 +6,7 @@ import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readSession, type Run } from "../src/run.ts";
+import { summary } from "../src/herdr.ts";
 
 // Own the entire private server so every pane inherits the same no-network fixture configuration.
 const server = `swarm-e2e-${process.pid}`;
@@ -13,6 +14,7 @@ assert.equal(process.env.HERDR_ENV, "1", "Run inside herdr.");
 const exec = promisify(execFile);
 async function cli(args: string[], timeout = 15_000): Promise<any> {
   const { stdout } = await exec("herdr", ["--session", server, ...args], { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
+  if (args[0] === "pane" && args[1] === "run") return; // native pane run has no JSON reply
   const reply = JSON.parse(stdout); if (reply.error) throw new Error(JSON.stringify(reply.error)); return reply.result;
 }
 async function wait<T>(get: () => T | Promise<T>, label: string, timeout = 90_000): Promise<NonNullable<T>> {
@@ -24,7 +26,7 @@ const base = mkdtempSync(join(tmpdir(), "swarm-e2e-")); const dir = join(base, "
 mkdirSync(dir); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 copyFileSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), "extensions/herdr-agent-state.ts"), join(agentDir, "extensions/herdr-agent-state.ts"));
 mkdirSync(join(agentDir, "agents"), { recursive: true });
-writeFileSync(join(agentDir, "agents/script-runner.md"), "---\nmodel: swarm-e2e/scripted\nthinking: off\ncan-spawn: true\n---\nRun the scripted task.");
+writeFileSync(join(agentDir, "agents/script-runner.md"), "---\ndescription: Run isolated scripted tasks\nmodel: swarm-e2e/scripted\nthinking: off\ncan-spawn: true\n---\nRun the scripted task.");
 writeFileSync(join(agentDir, "extensions/demo.ts"), `export {default} from ${JSON.stringify(resolve("test/e2e-peer.ts"))};`);
 writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off", swarm: { maxAgents: 3 } }));
 const file = join(dir, "spawner.jsonl");
@@ -38,7 +40,7 @@ const results = (name: string) => entries().filter(e => e.type === "custom_messa
 const live = async () => (await cli(["agent", "list"])).agents as any[];
 async function ended(name: string) { await wait(async () => !(await live()).some(a => a.name === name), `${name} ended`); }
 async function ready(name: string) { await wait(async () => (await live()).find(a => a.name === name && ["idle", "done"].includes(a.agent_status)), `${name} ready`); }
-let workspace: string | undefined; let pane: string | undefined;
+let workspace: string | undefined; let pane: string | undefined; let identityPane: string | undefined;
 async function startSpawner() {
   await cli(["agent", "start", "demo-spawner", "--kind", "pi", "--pane", pane!, "--timeout", "60000", "--", "--session", file, "-e", resolve("src/index.ts"), "--model", "swarm-e2e/scripted", "--thinking", "off"], 70_000);
 }
@@ -63,6 +65,16 @@ try {
   assert.equal((await invoke("swarm_spawn", { name: "demo-a", task: taskA })).isError, false);
   assert.equal((await invoke("swarm_spawn", { name: "demo-b", task: taskB })).isError, false);
   const a = record("demo-a");
+  const roster = await invoke("swarm_list");
+  assert.equal(roster.details.self, "demo-spawner");
+  assert.equal(roster.details.agents.find((a: any) => a.name === "demo-spawner").title, undefined, "plain pi publishes no title");
+  assert.equal(roster.details.agents.find((a: any) => a.name === "demo-a").title, Array.from(`peer · ${summary(taskA)}`).slice(0, 80).join(""));
+  assert.match(roster.content[0].text, /demo-a · peer · SWARM_TEST:/);
+  await wait(async () => {
+    const { stdout } = await exec("herdr", ["--session", server, "pane", "read", pane!, "--source", "recent-unwrapped", "--lines", "80"], { encoding: "utf8" });
+    return /\d+:\d{2}\s+demo-a.*working · e2e_wait/.test(stdout);
+  }, "live widget clock and current tool");
+  console.log("identity/widget: native pane titles, roster and live tool/elapsed display passed");
 
   // Native terminal connection and delivery, not fake-herdr error classification.
   assert.equal((await invoke("swarm_send", { message: "MISSING_TO" })).isError, true);
@@ -91,6 +103,7 @@ try {
 
   const scriptPane = (await cli(["tab", "create", "--workspace", workspace!, "--no-focus", "--cwd", dir])).root_pane.pane_id;
   await cli(["agent", "start", "script-runner", "--kind", "pi", "--pane", scriptPane, "--", "--session", join(dir, "script.jsonl"), "-e", resolve("src/index.ts"), "--swarm-agent", "script-runner", "--swarm-exit"], 70_000);
+  assert.equal((await live()).find(a => a.name === "script-runner").title, "script-runner · Run isolated scripted tasks");
   await cli(["agent", "prompt", "script-runner", marker([step("swarm_send", { to: "demo-spawner", message: "SCRIPT_WAIT", wait: true })])]);
   await wait(() => received(file, "SCRIPT_WAIT"), "script waiting message");
   await ready("script-runner"); await sleep(1200);
@@ -99,6 +112,21 @@ try {
   await ended("script-runner");
   await wait(async () => { try { await cli(["pane", "get", scriptPane]); return false; } catch { return true; } }, "script pane closed after exit");
   console.log("script roles: settled --swarm-exit session handles a plain herdr follow-up, then exits and closes its pane");
+
+  // Direct pi startup, not herdr agent start: names must exist before any swarm tool is called.
+  const unnamedPane = (await cli(["tab", "create", "--workspace", workspace!, "--no-focus", "--cwd", dir])).root_pane.pane_id;
+  identityPane = unnamedPane;
+  await cli(["pane", "run", unnamedPane, `pi --session ${join(dir, "unnamed.jsonl")} -e ${resolve("src/index.ts")} --swarm-agent script-runner`]);
+  const unnamed = await wait(async () => (await live()).find(a => a.pane_id === unnamedPane && a.name === "script-runner-1" && a.title === "script-runner · Run isolated scripted tasks"), "preset startup name/title without tools");
+  await ready(unnamed.name);
+  await cli(["agent", "prompt", unnamed.name, "/e2e-no-reply"]); await ended(unnamed.name);
+  await cli(["pane", "run", unnamedPane, `pi --session ${join(dir, "plain.jsonl")} -e ${resolve("src/index.ts")} --model swarm-e2e/scripted`]);
+  const plain = await wait(async () => (await live()).find(a => a.pane_id === unnamedPane && a.name), "manual startup name without tools");
+  assert.equal(plain.title, undefined, "ending the preset clears its native title on the same pane");
+  await ready(plain.name);
+  await cli(["agent", "prompt", plain.name, "/e2e-no-reply"]); await ended(plain.name);
+  await cli(["pane", "close", unnamedPane]);
+  console.log("startup/cleanup: unnamed preset self-reports before tools; subsequent plain pi has no stale title");
 
   await invoke("swarm_spawn", { name: "monitor", task: marker([step("e2e_wait", { file: "monitor-change" }), step("swarm_send", { to: "demo-spawner", message: "MONITOR_CHANGE" }), step("e2e_wait", { file: "monitor-stop" })]) });
   assert.ok((await live()).some(a => a.name === "monitor"), "a running monitor stays online");
@@ -154,6 +182,7 @@ try {
   console.log(`PASS: isolated herdr demo (${server})`);
 } catch (error) {
   try { const agents = await live(); console.error(JSON.stringify(agents)); for (const agent of agents) console.error(JSON.stringify(await cli(["agent", "read", agent.pane_id, "--source", "recent-unwrapped", "--lines", "50"]))); } catch {}
+  if (identityPane) { try { const output = await exec("herdr", ["--session", server, "pane", "read", identityPane, "--source", "recent-unwrapped", "--lines", "80"], { encoding: "utf8" }); console.error(output.stdout); } catch {} }
   if (pane) { try { const output = await exec("herdr", ["--session", server, "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "80"], { encoding: "utf8" }); console.error(output.stdout); } catch {} }
   throw error;
 } finally {

@@ -33,6 +33,16 @@ if (key === 'agent list') {
   if (error) fail(error, 'rename failed');
   ok({ agent: own });
 } else if (key === 'pane current') ok({ pane: { pane_id: 'w1:p1', workspace_id: 'w1' } });
+else if (key === 'pane report-metadata') {
+  if (state.metadataError) fail(state.metadataError, 'metadata failed');
+  const own = state.agents.find(a => a.pane_id === args[2]);
+  if (own) {
+    if (args.includes('--title')) own.title = Array.from(args[args.indexOf('--title') + 1]).slice(0, 80).join('');
+    if (args.includes('--clear-title')) delete own.title;
+    save();
+  }
+  // Native report-metadata succeeds without a JSON reply.
+}
 else if (key === 'pane layout') ok({ layout: state.layouts?.[args[args.indexOf('--pane') + 1]] ?? state.layout });
 else if (key === 'pane split') { state.lastCwd = args[args.indexOf('--cwd') + 1]; save(); ok({ pane: { pane_id: 'w1:p9' } }); }
 else if (key === 'tab create') { state.lastCwd = args[args.indexOf('--cwd') + 1]; save(); ok({ root_pane: { pane_id: 'w1:p8' } }); }

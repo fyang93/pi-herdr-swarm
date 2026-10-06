@@ -70,7 +70,7 @@ for (const outcome of ["stop", "error", "aborted"] as const) test(`standalone --
     assert.equal(r.shutdowns(), outcome === "aborted" ? 0 : 1, "initial user prompt is not human takeover");
     assert.match(context, /You execute the standalone task/);
     assert.doesNotMatch(context, /spawned by|last reply is delivered to/);
-    assert.equal(readFileSync(join(dir, "calls.jsonl"), "utf8"), "", "fake shutdown must not close a pane");
+    assert.doesNotMatch(readFileSync(join(dir, "calls.jsonl"), "utf8"), /"close"/, "fake shutdown must not close a pane");
     assert.deepEqual(r.errors, []);
   } finally { await r.close(); }
 });

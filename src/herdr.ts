@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { realpathSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 export const MESSAGE_LIMIT = 4000;
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 export function validateName(name: string): string {
@@ -39,7 +40,7 @@ export async function herdr(args: string[], timeout = 10_000, raw = false): Prom
     throw error;
   }
 }
-export interface LiveAgent { name?: string; pane_id: string; agent_status?: string; agent: string; cwd?: string; foreground_cwd?: string; agent_session?: { kind: string; value: string } }
+export interface LiveAgent { name?: string; title?: string; pane_id: string; agent_status?: string; agent: string; cwd?: string; foreground_cwd?: string; agent_session?: { kind: string; value: string } }
 export async function projectRoot(cwd: string): Promise<string> {
   const canonical = await realpath(cwd);
   try {
@@ -109,18 +110,34 @@ export function availableName(base: string, agents: LiveAgent[], history: Iterab
 export async function currentPane(): Promise<{ pane_id: string; workspace_id: string }> {
   return (await herdr(["pane", "current", "--current"])).pane;
 }
-/** This session's herdr name; an unnamed caller is named after its pane (unique while online), never renamed. */
-export async function identity(named?: (name: string) => void): Promise<string> {
+/** This session's herdr name; name an unnamed preset or caller once, never rename an existing address. */
+export async function identity(named?: (name: string) => void, preset?: string, signal?: AbortSignal): Promise<string> {
   requireHerdr();
   const pane = (await currentPane()).pane_id;
-  const own = await get(pane);
+  let own = await get(pane);
+  // Native integration registration is asynchronous on manual pi startup; retry reads, never renames.
+  for (let n = 0; signal && !own && n < 50; n++) { await sleep(100, undefined, { signal }); own = await get(pane); }
+  signal?.throwIfAborted();
   if (!own) throw new Error("herdr does not recognize pi in the caller's pane.");
   if (own.name) return validateName(own.name);
-  const name = validateName(`swarm-${pane.replace(":", "-").toLowerCase()}`);
+  const name = validateName(preset ? availableName(preset, await list()) : `swarm-${pane.replace(":", "-").toLowerCase()}`);
   const confirmed = (await herdr(["agent", "rename", pane, name])).agent;
   if (confirmed?.pane_id !== pane || !confirmed.name) throw new Error("herdr did not confirm the agent name; inspect the caller pane.");
   named?.(validateName(confirmed.name));
   return confirmed.name;
+}
+
+/** herdr exposes this display-only title as agent.list's `title`; successful reports have empty stdout. */
+export async function reportTitle(title?: string): Promise<void> {
+  const pane = (await currentPane()).pane_id;
+  await herdr(["pane", "report-metadata", pane, "--source", "pi-herdr-swarm", ...(title ? ["--title", title] : ["--clear-title"])], 10_000, true);
+}
+
+/** A bounded first sentence/line, not another copy of the task or preset description. */
+export function summary(text: string): string {
+  const first = text.trim().match(/^[^\r\n]*?(?:[。！？]|[.!?](?=\s|$)|$)/m)?.[0] ?? "";
+  const line = first.replace(/\s+/g, " ");
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
 export interface Delivery { to: string; status: "submitted" | "rejected" | "unknown"; code?: string; error?: string }

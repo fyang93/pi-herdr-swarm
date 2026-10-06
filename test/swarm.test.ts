@@ -9,7 +9,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, validateToolArguments } from "@earendil-works/pi-ai";
 import { setTimeout as sleep } from "node:timers/promises";
-import { checkMessage, validateName, deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
+import { checkMessage, validateName, deliver, start, splitDirection, identity, projectRoot, inProject, summary } from "../src/herdr.ts";
 import { extensionPath, presets, loadout, requiredTools, snapshot, spawnPolicy, checkSpawn } from "../src/presets.ts";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
 
@@ -31,7 +31,7 @@ function reset(extra: any = {}) {
 const calls = () => readFileSync(join(dir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map(s => JSON.parse(s) as string[]);
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-async function harness(flags: Record<string, unknown> = {}) {
+async function harness(flags: Record<string, unknown> = {}, mode = "print") {
   const handlers = new Map<string, Function[]>();
   const tools = new Map<string, any>();
   const notices: any[] = [];
@@ -40,9 +40,9 @@ async function harness(flags: Record<string, unknown> = {}) {
   manager.appendMessage(fauxAssistantMessage("initialized"));
   let shutdowns = 0;
   const context: any = {
-    cwd: dir, mode: "print", model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1"), getModel("anthropic", "claude-sonnet-4-5")], find: (provider: string, id: string) => getModel(provider as any, id as any) }, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true,
+    cwd: dir, mode, model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1"), getModel("anthropic", "claude-sonnet-4-5")], find: (provider: string, id: string) => getModel(provider as any, id as any) }, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true,
     sessionManager: manager,
-    ui: { setWidget() {}, notify: (message: string) => notices.push(message) }, shutdown: () => { shutdowns++; },
+    ui: { setWidget() {}, setStatus() {}, getEditorText: () => "", onTerminalInput: () => () => {}, notify: (message: string) => notices.push(message) }, shutdown: () => { shutdowns++; },
   };
   const activeTools = ["read", "swarm_spawn", "swarm_send", "swarm_list"];
   const registered = [...activeTools, "codemode"]; // pi activates only registered, non-hidden tools
@@ -217,6 +217,7 @@ test("monitor is an example, not bundled; once installed it spawns with its role
     assert.equal(readFileSync(args[args.indexOf("--append-system-prompt") + 1], "utf8"), monitor.body);
     assert.deepEqual(record.snapshot.tools, ["codemode"]);
     assert.equal(args[args.indexOf("--swarm-tools") + 1], "codemode");
+    assert.equal(args[args.indexOf("--swarm-title") + 1], "monitor · Keep an eye on health.json and tell me if the service status changes.");
     assert.equal(calls().find(c => c[1] === "prompt")!.at(-1), task);
   } finally {
     await h.event("session_shutdown", { reason: "reload" });
@@ -317,15 +318,101 @@ test("child policy gates fresh spawns and malformed startup flags fail closed", 
   } finally { for (const file of ["policy-executor.md", "policy-leader.md", "policy-bad.md"]) rmSync(join(agents, file)); }
 });
 
-test("list does not name the caller; send names it once with a notification", async () => {
+test("TUI startup lets later native integration register pi, names before tools, and cancels on shutdown", async () => {
+  reset({ agents: [] }); const h = await harness({}, "tui");
+  try {
+    await sleep(150); // integration may run after our session_start handler
+    save({ ...readState(), agents: [{ agent: "pi", pane_id: "w1:p1", cwd: dir }] });
+    for (let n = 0; n < 100 && !readState().agents[0].name; n++) await sleep(20);
+    assert.equal(readState().agents[0].name, "swarm-w1-p1", "no tool call was needed");
+    assert.equal(calls().filter(c => c[1] === "rename").length, 1);
+    assert.equal(calls().some(c => c[1] === "report-metadata"), false);
+    await h.event("session_shutdown", { reason: "new" });
+    reset({ agents: [] });
+    await h.event("session_start", { reason: "new" });
+    await sleep(100);
+    await h.event("session_shutdown", { reason: "quit" });
+    save({ ...readState(), agents: [{ agent: "pi", pane_id: "w1:p1", cwd: dir }] });
+    await sleep(150);
+    assert.equal(calls().some(c => c[1] === "rename" || c[1] === "report-metadata"), false, "a cancelled startup cannot name a subsequent occupant");
+  } finally { await h.event("session_shutdown", { reason: "quit" }); }
+});
+
+test("native titles: preset startup names once, lists role/description, and clears on replacement/reload/quit", async () => {
+  const agents = join(dir, ".pi/agents"); mkdirSync(agents, { recursive: true });
+  const file = join(agents, "metadata-reviewer.md");
+  writeFileSync(file, "---\nname: metadata-reviewer\ndescription: Review code. Check safety.\n---\nReview carefully.");
+  const unnamed = [{ pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "metadata-reviewer-1", pane_id: "w1:p2", agent: "pi", cwd: dir }];
+  reset({ agents: unnamed });
+  const h = await harness({ "swarm-agent": "metadata-reviewer" });
+  try {
+    assert.equal(readState().agents[0].name, "metadata-reviewer-2");
+    assert.equal(readState().agents[0].title, "metadata-reviewer · Review code. Check safety.");
+    const listed = await h.tool("swarm_list");
+    assert.match(listed.content[0].text, /metadata-reviewer-2 · metadata-reviewer · Review code\. Check safety\. · unknown · w1:p1/);
+    assert.equal(listed.details.agents[0].title, "metadata-reviewer · Review code. Check safety.");
+    for (const reason of ["new", "resume", "fork", "reload", "quit"]) {
+      await h.event("session_shutdown", { reason });
+      assert.equal(readState().agents[0].title, undefined);
+      await h.event("session_start", { reason });
+    }
+    assert.equal(calls().filter(c => c[1] === "rename").length, 1, "existing names are never changed");
+    assert.ok(calls().filter(c => c[1] === "report-metadata").every(c => c.includes("pi-herdr-swarm")));
+    assert.equal(existsSync(join(dir, ".pi/swarm")), false);
+  } finally { await h.event("session_shutdown", { reason: "quit" }); rmSync(file); }
+});
+
+test("spawned title belongs only to its launch session; resumes carry the new task, no preset uses peer", async () => {
+  reset(); const flags: Record<string, unknown> = {};
+  const h = await harness(flags);
+  try {
+    await h.tool("swarm_spawn", { name: "title-peer", task: "First task. More detail.\nMore text" });
+    const args = calls().find(c => c[1] === "start")!;
+    assert.equal(args[args.indexOf("--swarm-title") + 1], "peer · First task.");
+    Object.assign(flags, { "swarm-name": "spawner", "swarm-spawner": "parent", "swarm-session": h.context.sessionManager.getSessionFile(), "swarm-title": "peer · First task." });
+    await h.event("session_start");
+    assert.equal(readState().agents[0].title, "peer · First task.");
+    await h.event("session_shutdown", { reason: "reload" });
+    assert.equal(readState().agents[0].title, undefined);
+    await h.event("session_start", { reason: "reload" });
+    assert.equal(readState().agents[0].title, "peer · First task.");
+    h.context.sessionManager.newSession();
+    await h.event("session_start", { reason: "new" });
+    assert.equal(readState().agents[0].title, undefined, "launch flags cannot label an unrelated replacement session");
+    assert.equal(calls().filter(c => c[1] === "rename").length, 0);
+  } finally { await h.event("session_shutdown", { reason: "quit" }); }
+  assert.equal(summary("\n 检查安全。然后修复。"), "检查安全。");
+  assert.equal(summary("Read code! Then test."), "Read code!");
+  assert.equal(summary("Read code\nThen test"), "Read code");
+  assert.equal(summary("x".repeat(1000)).length, 120);
+});
+
+test("title report failure is visible but does not disable tools; startup outside herdr writes nothing", async () => {
+  const agents = join(dir, ".pi/agents"); mkdirSync(agents, { recursive: true });
+  const file = join(agents, "title-error.md"); writeFileSync(file, "---\nname: title-error\n---\nRole");
+  reset({ metadataError: "server_error" }); const h = await harness({ "swarm-agent": "title-error" });
+  try {
+    assert.ok(h.notices.some(n => String(n).includes("metadata failed")));
+    assert.equal((await h.tool("swarm_send", { to: "peer", message: "still works" })).isError, false);
+    save({ ...readState(), metadataError: undefined });
+  } finally { await h.event("session_shutdown", { reason: "quit" }); rmSync(file); }
+  reset(); const env = process.env.HERDR_ENV; delete process.env.HERDR_ENV;
+  try {
+    const plain = await harness();
+    try { assert.deepEqual(calls(), []); } finally { await plain.event("session_shutdown", { reason: "quit" }); }
+  } finally { process.env.HERDR_ENV = env; }
+});
+
+test("startup names the caller before any tool; list and send keep that name",  async () => {
   reset({ agents: [{ pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "peer", pane_id: "w1:p2", agent: "pi", cwd: dir }] });
   const h = await harness({ "swarm-spawner": "parent" });
   try {
     assert.deepEqual([...h.tools.keys()], ["swarm_spawn", "swarm_send", "swarm_list"]);
     const listed = await h.tool("swarm_list");
     assert.equal(listed.details.presets.length > 0, listed.content[0].text.includes("Presets:"));
-    assert.equal(listed.details.self, undefined, "an unnamed caller has no name yet");
-    assert.equal(calls().some(c => c[1] === "rename"), false);
+    assert.equal(listed.details.self, "swarm-w1-p1", "startup already assigned a name");
+    assert.equal(calls().filter(c => c[1] === "rename").length, 1);
+    assert.equal(calls().some(c => c[1] === "report-metadata"), false, "manual pi writes no title");
     for (const to of ["peer", ["peer"]]) {
       const sent = await h.tool("swarm_send", { to, message: "announcement" });
       assert.equal(sent.isError, false);
@@ -400,6 +487,8 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: second.id });
     await h.tool("swarm_spawn", { resume: "second", task: "Follow-up task" });
     assert.equal(calls().filter(c => c[1] === "prompt").at(-1)!.at(-1)!, "Follow-up task");
+    const resumed = calls().filter(c => c[1] === "start").at(-1)!;
+    assert.equal(resumed[resumed.indexOf("--swarm-title") + 1], "peer · Follow-up task");
   } finally { await h.event("session_shutdown", { reason: "reload" }); }
 });
 

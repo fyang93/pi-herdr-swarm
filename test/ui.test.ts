@@ -126,9 +126,9 @@ test("list preserves actual statuses", () => {
     assert.match(row, /\x1b\[38;5;244mw1:p9/);
 
   }
-  const list = rendered(result("wire", { agents: [{ name: "peer", pane_id: "w1:p9", agent_status: "blocked" }], presets: [{ name: "worker", description: "Code review", model: "provider/model" }] }), true, {}, "swarm_list");
+  const list = rendered(result("wire", { agents: [{ name: "peer", title: "worker · Check security", pane_id: "w1:p9", agent_status: "blocked" }], presets: [{ name: "worker", description: "Code review", model: "provider/model" }] }), true, {}, "swarm_list");
   assert.match(plain(list.render(100)), /1 agents · 1 presets/);
-  assert.match(plain(list.render(100)), /⚠ blocked/);
+  assert.match(plain(list.render(100)), /peer · worker · Check security.*⚠ blocked.*w1:p9/);
   assert.match(plain(list.render(100)), /worker \[provider\/model\] · Code review/);
   assert.doesNotMatch(plain(list.render(100)), /Unlisted does not prove/);
   const emptyPresets = rendered(result("wire", { agents: [], presets: [] }), true, {}, "swarm_list");
@@ -155,6 +155,21 @@ test("running widget ports bordered name, preset and warning status using the ac
   widget.invalidate();
   assert.match(widget.render(80).join(""), /\x1b\[38;5;99m/);
   palette.accent = oldAccent;
+});
+
+test("running widget shows the run clock, role and tool only while working, with bounded Unicode rows", () => {
+  const now = Date.parse("2026-01-01T00:02:05Z");
+  const agents = [
+    { name: "研究员", agent: "researcher", status: "working", tool: "bash", started: "2026-01-01T00:01:00Z" },
+    { name: "reviewer", agent: "reviewer", status: "blocked", tool: "read", started: "2026-01-01T00:00:00Z" },
+    { name: "peer", status: "starting", started: "invalid" },
+  ];
+  const component = runningView(agents, theme, now);
+  assert.match(plain(component.render(100)), /01:05\s+研究员 \(researcher\).*working · bash/);
+  assert.match(plain(component.render(100)), /02:05\s+reviewer.*blocked/);
+  assert.match(plain(component.render(100)), /00:00\s+peer.*starting/);
+  assert.doesNotMatch(plain(component.render(100)), / · read|reviewer \(reviewer\)/);
+  for (let width = 0; width <= 100; width++) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
 });
 
 test("result messages retain full Markdown on expansion and truthful status colors", () => {

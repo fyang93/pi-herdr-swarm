@@ -3,7 +3,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
-import { MESSAGE_LIMIT, availableName, currentPane, deliver, checkPiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
+import { setImmediate as nextTick } from "node:timers/promises";
+import { MESSAGE_LIMIT, availableName, currentPane, deliver, checkPiIntegration, sessionBinding, identity, list, projectRoot, reportTitle, requireHerdr, start, summary, validateName } from "./herdr.ts";
 import { loadout, presets, requiredTools, snapshot, spawnPolicy, checkSpawn } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, noticeView, resultMessageView } from "./ui.ts";
@@ -27,11 +28,22 @@ export default function swarm(pi: ExtensionAPI) {
     if (!project) throw new Error("Swarm project unavailable; check the session startup error.");
     return project;
   }
-  const name = (context: ExtensionContext) => identity(value => context.ui.notify(`This session is now named ${value}`, "info"));
+  let registration = Promise.resolve();
+  let activeContext: ExtensionContext | undefined;
+  let startupAbort: AbortController | undefined;
+  const named = (context: ExtensionContext) => (value: string) => context.ui.notify(`This session is now named ${value}`, "info");
+  const name = async (context: ExtensionContext) => { await registration; return identity(named(context)); };
   // `pi --swarm-agent <preset>` starts any session as that preset, e.g. when a host launches it outside swarm_spawn.
   pi.registerFlag("swarm-agent", { type: "string", description: "Start this session as a swarm preset: its model, thinking and role." });
   pi.registerFlag("swarm-tools", { type: "string", description: "Internal: tools a swarm preset requires, activated at session start." });
   pi.registerFlag("swarm-can-spawn", { type: "string", description: "Internal: saved preset spawn permission (JSON boolean)." });
+  pi.registerFlag("swarm-title", { type: "string", description: "Internal: spawned peer's role and task summary." });
+  let titleReported = false;
+  async function clearTitle() {
+    if (!titleReported) return;
+    await reportTitle();
+    titleReported = false;
+  }
   let role: string | undefined;
   let canSpawn = true;
   /** Activate a preset's required tools; one that does not become active (unregistered, hidden) is reported, not fatal. */
@@ -42,6 +54,13 @@ export default function swarm(pi: ExtensionAPI) {
     if (missing.length) context.ui.notify(`swarm: required tools unavailable: ${missing.join(", ")}`, "warning");
   }
   pi.on("session_start", async (_event, context) => {
+    activeContext = undefined;
+    startupAbort?.abort();
+    await registration;
+    await clearTitle();
+    activeContext = context;
+    startupAbort = new AbortController();
+    const signal = startupAbort.signal;
     requireTools(requiredTools(pi.getFlag("swarm-tools")), context);
     project = undefined;
     void checkPiIntegration(message => context.ui.notify(message, "warning"));
@@ -51,27 +70,51 @@ export default function swarm(pi: ExtensionAPI) {
     const agent = pi.getFlag("swarm-agent");
     const policy = pi.getFlag("swarm-can-spawn");
     if (policy !== undefined || (typeof agent === "string" && agent)) canSpawn = false; // fail closed on invalid role configuration
+    const preset = typeof agent === "string" && agent ? presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent) : undefined;
     try {
       if (policy !== undefined) canSpawn = spawnPolicy(JSON.parse(String(policy)));
-      if (typeof agent !== "string" || !agent) return;
-      const preset = presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent);
-      if (!preset) throw new Error(`no preset named ${agent}`);
-      const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
-      canSpawn = config.canSpawn ?? true;
-      const [provider, ...id] = config.model.split("/");
-      const model = context.modelRegistry.find(provider, id.join("/"));
-      if (!model || !await pi.setModel(model)) throw new Error(`model ${config.model} unavailable`);
-      pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
-      role = config.prompt;
-      requireTools(config.tools ?? [], context);
+      if (typeof agent === "string" && agent) {
+        if (!preset) throw new Error(`no preset named ${agent}`);
+        const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
+        canSpawn = config.canSpawn ?? true;
+        const [provider, ...id] = config.model.split("/");
+        const model = context.modelRegistry.find(provider, id.join("/"));
+        if (!model || !await pi.setModel(model)) throw new Error(`model ${config.model} unavailable`);
+        pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
+        role = config.prompt;
+        requireTools(config.tools ?? [], context);
+      }
     } catch (error) { canSpawn = false; try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
+    if (process.env.HERDR_ENV !== "1") return;
+    // Do not block later session_start handlers: herdr's integration may register pi after us.
+    registration = nextTick().then(async () => {
+      if (activeContext !== context) return;
+      try {
+        await identity(named(context), typeof agent === "string" ? agent : undefined, signal);
+        if (activeContext !== context) return;
+        const launchedTitle = runState.deliversTo(context) && pi.getFlag("swarm-title");
+        const title = typeof launchedTitle === "string" ? launchedTitle : preset && `${preset.name}${preset.description ? ` · ${preset.description.replace(/\s+/g, " ").trim()}` : ""}`;
+        if (title) {
+          titleReported = true; // clear even if the report's outcome is uncertain
+          await reportTitle(title);
+        }
+      } catch (error) { if (activeContext === context) context.ui.notify(`swarm: ${String(error)}`, "warning"); }
+    });
+    if (context.mode !== "tui") await registration;
   });
   const runState = lifecycle(pi);
+  pi.on("session_shutdown", async () => {
+    activeContext = undefined;
+    startupAbort?.abort();
+    await registration;
+    await clearTitle();
+  });
   pi.on("before_agent_start", (event, context) => {
     const run = runState.deliversTo(context);
     // The peer cannot see how its run ends otherwise; without this it answers a late message with only an addendum.
     const delivery = run && `You are ${run.name}, spawned by ${run.spawner}. When you stop with nothing pending, your session ends and your last reply is delivered to ${run.spawner} as your result. Make that reply complete on its own: after answering a later message, restate the whole result, not only what changed.`;
-    const added = [role, delivery].filter(Boolean).join("\n\n");
+    const discovery = process.env.HERDR_ENV === "1" && "Use swarm_list to discover your name and other online agents' roles/tasks, status and panes; swarm_send addresses their exact live names. Roles/tasks are herdr pane titles, not a separate registry.";
+    const added = [role, delivery, discovery].filter(Boolean).join("\n\n");
     return added ? { systemPrompt: `${event.systemPrompt}\n\n${added}` } : undefined;
   });
 
@@ -126,7 +169,7 @@ export default function swarm(pi: ExtensionAPI) {
         ? await prepareResume(params, history, known)
         : await prepareSpawn(params, history, known, context);
       const args = loadout(config, session);
-      args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session);
+      args.push("--swarm-name", peer, "--swarm-spawner", spawner, "--swarm-session", session, "--swarm-title", `${config.preset || "peer"} · ${summary(params.task)}`);
       if (boundary) args.push("--swarm-boundary", boundary);
       let entry: string | undefined;
       let launched;
@@ -166,13 +209,14 @@ export default function swarm(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: "swarm_list", label: "Swarm list",
-    description: "Show your name, online agents, status, panes, and available presets.",
+    description: "Show your name, online agents with roles/tasks (pane titles), status, panes, and available presets.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
       requireHerdr();
+      await registration;
       const agents = await list();
       const available = presets(context.cwd, context.isProjectTrusted());
-      const agentLines = agents.map(a => `${a.name || "(unnamed)"} · ${a.agent_status || "unknown"} · ${a.pane_id}`);
+      const agentLines = agents.map(a => `${a.name || "(unnamed)"}${a.title ? ` · ${a.title}` : ""} · ${a.agent_status || "unknown"} · ${a.pane_id}`);
       const presetLines = available.map(p => `${p.name}${p.fields.model ? ` [${p.fields.model}]` : ""} — ${p.description}`);
       const pane = (await currentPane()).pane_id;
       const self = agents.find(a => a.pane_id === pane)?.name;
