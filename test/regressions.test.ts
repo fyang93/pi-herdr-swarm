@@ -33,7 +33,7 @@ async function runtime(auto = false, extra?: ExtensionFactory, manager?: Session
   await session.bindExtensions({ mode: "tui", shutdownHandler: () => { shutdowns++; }, onError: e => errors.push(e.error),
     uiContext: { setWidget: (_key: string, factory: any) => { widget = factory; }, setStatus() {}, getEditorText: () => editor, notify: (message: string) => notices.push(message), onTerminalInput: (handler: typeof terminalInput) => { terminalInput = handler; return () => { terminalInput = undefined; }; } } as any });
   return { session, faux, errors, notices, draft: (text: string) => { editor = text; }, type: (data: string) => terminalInput?.(data), shutdowns: () => shutdowns,
-    waiting: () => widget ? widget(undefined, { fg: (_c: string, text: string) => text }).render(200)[0] : "",
+    waiting: () => widget ? widget(undefined, { fg: (_c: string, text: string) => text, bold: (text: string) => text }).render(200).join("\n") : "",
     close: async () => { await session.extensionRunner!.emit({ type: "session_shutdown", reason: "reload" }); session.dispose(); } };
 }
 const count = () => (globalThis as any)[PENDING_COUNT_KEY]?.() ?? 0;

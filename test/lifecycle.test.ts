@@ -27,7 +27,7 @@ async function runtime() {
  const {session}=await createAgentSession({cwd,agentDir:cwd,model:faux.getModel(),modelRuntime,resourceLoader:loader,settingsManager,sessionManager:manager});
  let widget:any;let status:any;const errors:string[]=[];
  await session.bindExtensions({mode:'tui',shutdownHandler(){},onError:e=>errors.push(e.error),uiContext:{setWidget:(_k:string,f:any)=>widget=f,setStatus:(_k:string,v:any)=>status=v,notify(){},getEditorText:()=>'',onTerminalInput:()=>()=>{}} as any});
- return {session,manager,faux,base,id,live,errors,status:()=>status,waiting:()=>widget?widget(undefined,{fg:(_c:string,s:string)=>s}).render(80)[0]:'',close:async()=>{await session.extensionRunner!.emit({type:'session_shutdown',reason:'reload'});session.dispose();}};
+ return {session,manager,faux,base,id,live,errors,status:()=>status,waiting:()=>widget?widget(undefined,{fg:(_c:string,s:string)=>s,bold:(s:string)=>s}).render(80).join('\n'):'',close:async()=>{await session.extensionRunner!.emit({type:'session_shutdown',reason:'reload'});session.dispose();}};
 }
 const results=(m:SessionManager)=>m.getEntries().filter(e=>e.type==='custom_message'&&e.customType==='swarm_result');
 test('branch navigation with zero pending clears widget and error status',async()=>{
@@ -62,7 +62,7 @@ test('tree round trip restores pending, updates blocked state, and never duplica
  const r=await runtime();try{
   r.faux.setResponses(Array.from({length:10},()=>fauxAssistantMessage('processed')));
   await r.session.navigateTree(r.base,{summarize:false});assert.equal(r.waiting(),'');
-  state([{...r.live,agent_status:'blocked'}]);await r.session.navigateTree(r.id,{summarize:false});assert.equal(r.waiting(),'Waiting: peer');await sleep(300);assert.equal(results(r.manager).length,0);assert.equal((globalThis as any)[PENDING_COUNT_KEY](),1);
+  state([{...r.live,agent_status:'blocked'}]);await r.session.navigateTree(r.id,{summarize:false});assert.match(r.waiting(),/Swarm.*1 running/);assert.match(r.waiting(),/peer/);await sleep(300);assert.equal(results(r.manager).length,0);assert.equal((globalThis as any)[PENDING_COUNT_KEY](),1);
   state([]);await sleep(1250);await r.session.waitForIdle();assert.equal(results(r.manager).length,1);assert.equal(r.waiting(),'');
   await r.session.navigateTree(r.base,{summarize:false});await r.session.navigateTree(r.id,{summarize:false});await sleep(1200);
   assert.equal(results(r.manager).length,1);assert.equal((globalThis as any)[PENDING_COUNT_KEY](),0);assert.equal(r.waiting(),'');assert.deepEqual(r.errors,[]);

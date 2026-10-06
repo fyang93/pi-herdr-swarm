@@ -9,8 +9,8 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, validateToolArguments } from "@earendil-works/pi-ai";
 import { setTimeout as sleep } from "node:timers/promises";
-import { checkMessage, validateName, namePattern, deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
-import { extensionPath, presets, loadout, requiredTools, snapshot } from "../src/presets.ts";
+import { checkMessage, validateName, deliver, start, splitDirection, identity, projectRoot, inProject } from "../src/herdr.ts";
+import { extensionPath, presets, loadout, requiredTools, snapshot, spawnPolicy, checkSpawn } from "../src/presets.ts";
 import swarm, { PENDING_COUNT_KEY } from "../src/index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "swarm-test-"));
@@ -29,7 +29,6 @@ function reset(extra: any = {}) {
   writeFileSync(join(dir, "calls.jsonl"), "");
 }
 const calls = () => readFileSync(join(dir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map(s => JSON.parse(s) as string[]);
-const scope = { root: dir, roots: new Map<string, string>() };
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 async function harness(flags: Record<string, unknown> = {}) {
@@ -41,7 +40,7 @@ async function harness(flags: Record<string, unknown> = {}) {
   manager.appendMessage(fauxAssistantMessage("initialized"));
   let shutdowns = 0;
   const context: any = {
-    cwd: dir, mode: "print", model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1"), getModel("anthropic", "claude-sonnet-4-5")] }, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true,
+    cwd: dir, mode: "print", model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1"), getModel("anthropic", "claude-sonnet-4-5")], find: (provider: string, id: string) => getModel(provider as any, id as any) }, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true,
     sessionManager: manager,
     ui: { setWidget() {}, notify: (message: string) => notices.push(message) }, shutdown: () => { shutdowns++; },
   };
@@ -49,7 +48,7 @@ async function harness(flags: Record<string, unknown> = {}) {
   const registered = [...activeTools, "codemode"]; // pi activates only registered, non-hidden tools
   swarm({
     on: (name: string, fn: Function) => handlers.set(name, [...(handlers.get(name) || []), fn]),
-    registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag: (name: string) => flags[name],
+    registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer() {}, registerFlag() {}, getFlag: (name: string) => flags[name], setModel: async () => true, setThinkingLevel() {},
     getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names.filter(name => registered.includes(name))); }, getAllTools: () => registered.map(name => ({ name })), getThinkingLevel: () => "high", getSettings: () => settings,
     appendEntry: (customType: string, data: any) => manager.appendCustomEntry(customType, data),
     sendMessage: async (message: any) => notices.push(message),
@@ -83,7 +82,7 @@ test("message and name validation preserves limits and rejects invalid input", (
   for (const message of ["", " ", null, 42]) assert.throws(() => checkMessage(message as any), /nonempty/);
   assert.throws(() => checkMessage("x".repeat(4001)), /4000/);
   assert.equal(validateName("us-news-1"), "us-news-1");
-  for (const name of ["a\nadmin", "2bad", "a".repeat(33)]) assert.throws(() => validateName(name), /names/);
+  for (const name of ["a\nadmin", "peer\n", "peer\r\n", "2bad", "a".repeat(33)]) assert.throws(() => validateName(name), /names/);
 });
 
 test("deliver pushes without storing, returns three states/codes, and never retries", async () => {
@@ -113,18 +112,18 @@ test("deliver pushes without storing, returns three states/codes, and never retr
   assert.equal(absent.deliveries[0].code, "agent_not_found");
   assert.equal(calls().some(c => c[1] === "get" || c[1] === "start"), false);
   reset({ listError: true });
-  const discovery = await deliver({ from: "spawner", to: "*", message: "outage" }, scope);
-  assert.equal(discovery.discovery?.status, "unknown");
-  assert.equal(discovery.discovery?.code, "server_error");
-  assert.deepEqual(discovery.deliveries, [], "a wildcard is not an actual recipient");
+  const direct = await deliver({ from: "spawner", to: "peer", message: "outage" });
+  assert.equal(direct.deliveries[0].status, "submitted");
+  assert.equal(calls().some(c => c[1] === "list"), false);
   await assert.rejects(deliver({ from: "spawner", to: "peer", message: "x".repeat(4001) }), /4000/);
 });
 
-test("'*' broadcasts within the project; exact names cross projects", async () => {
+test("exact recipient arrays report each outcome; names cross projects", async () => {
   reset();
-  const broadcast = await deliver({ from: "spawner", to: "*", message: "announcement" }, scope);
-  assert.deepEqual(broadcast.deliveries.map(d => d.to).sort(), ["blocked", "peer"]);
-  assert.equal(broadcast.deliveries.find(d => d.to === "blocked")?.status, "rejected");
+  const sent = await deliver({ from: "spawner", to: ["peer", "blocked", "missing", "spawner", "peer"], message: "announcement" });
+  assert.deepEqual(sent.deliveries.map(d => [d.to, d.status]), [["peer", "submitted"], ["blocked", "rejected"], ["missing", "rejected"], ["spawner", "rejected"]]);
+  assert.equal(calls().some(c => c[1] === "list" || c[1] === "get"), false);
+  assert.equal(calls().filter(c => c[1] === "prompt" && c[2] === "peer").length, 1);
   reset({ agents: [{ name: "other", pane_id: "w1:p4", cwd: "/other-project" }] });
   assert.equal((await deliver({ from: "spawner", to: "other", message: "cross-project" })).deliveries[0].status, "submitted");
   const prompts = calls().filter(c => c[1] === "prompt").length;
@@ -157,17 +156,12 @@ test("canonical Git roots separate nested repositories, worktrees, submodules an
   assert.equal(roots.size, 1); assert.ok(roots.has(sub));
 });
 
-test("arbitrary star patterns are anchored, exclude sender and unnamed agents, and use project equality", async () => {
-  assert.equal(namePattern("*news*")("us-news-1"), true);
-  assert.equal(namePattern("us-*-1")("us-news-1"), true);
-  assert.equal(namePattern("news*")("us-news-1"), false);
-  assert.equal(namePattern("***news**")("a-news-b"), true);
-  for (const pattern of ["news?", "[news]*", "news.*"]) assert.throws(() => namePattern(pattern));
-  const roles = join(dir, "roles"); mkdirSync(roles, { recursive: true });
-  const nested = join(dir, "nested"); mkdirSync(nested, { recursive: true }); await exec("git", ["init", "-q", nested]);
-  reset({ agents: [{ name: "spawner", pane_id: "p1", cwd: dir }, { name: "us-news-1", pane_id: "p2", cwd: roles }, { name: "other-news", pane_id: "p3", cwd: nested }, { pane_id: "p4", cwd: dir }] });
-  const result = await deliver({ from: "spawner", to: "*news*", message: "scoped" }, scope);
-  assert.deepEqual(result.deliveries.map(d => d.to), ["us-news-1"]);
+test("wildcards and malformed recipient arrays fail before any delivery", async () => {
+  reset();
+  for (const to of ["*", "*news*", "news?", "[news]*", "news.*", [], ["peer", "*"], ["peer", null], ["peer", 2], "peer\n", null]) {
+    await assert.rejects(deliver({ from: "spawner", to: to as any, message: "no side effects" }), /names|recipient/);
+  }
+  assert.deepEqual(calls(), []);
 });
 
 test("identity preserves existing names, otherwise uses pane id; no name search or ambiguous retry", async () => {
@@ -255,6 +249,72 @@ test("optional presets snapshot only configuration, respect trust and override o
   delete process.env.PI_CODING_AGENT_DIR;
 });
 
+test("spawn policy is strict, snapshots persist preset identity and child policy, and resume uses saved identity", async () => {
+  assert.equal(spawnPolicy(undefined), undefined);
+  assert.deepEqual(spawnPolicy([]), []);
+  assert.deepEqual(spawnPolicy(["Executor.v2", "Executor.v2"]), ["Executor.v2"]);
+  for (const value of [null, "executor", "", false, {}, [null], [1], [""], [" executor "], ["*"]]) {
+    assert.throws(() => spawnPolicy(value), /can-spawn/);
+    assert.throws(() => checkSpawn(value, "executor"), /can-spawn/);
+  }
+  checkSpawn(undefined); checkSpawn(undefined, "anything"); checkSpawn(["executor"], "executor");
+  for (const policy of [[], ["executor"]]) {
+    assert.throws(() => checkSpawn(policy), /denied/i);
+    assert.throws(() => checkSpawn(policy, "other"), /denied/i);
+  }
+  const context: any = { cwd: dir, model: getModel("openai", "gpt-4.1"), modelRegistry: { getAll: () => [getModel("openai", "gpt-4.1")] } };
+  const preset = { name: "executor", description: "", body: "Role", fields: { "can-spawn": [] } };
+  const config = await snapshot(preset, context, "off", {});
+  const saved = JSON.parse(JSON.stringify(config));
+  assert.equal(saved.preset, "executor"); assert.deepEqual(saved.canSpawn, []);
+  checkSpawn(["executor"], saved.preset);
+  assert.throws(() => checkSpawn(["other"], saved.preset), /denied/i);
+  const args = loadout(saved, join(dir, "session.jsonl"));
+  assert.equal(args[args.indexOf("--swarm-can-spawn") + 1], "[]");
+  assert.equal(args.includes("--swarm-agent"), false);
+  assert.equal(loadout(await snapshot(undefined, context, "off", {}), join(dir, "session.jsonl")).includes("--swarm-can-spawn"), false);
+  for (const value of [null, "executor", [false]]) await assert.rejects(snapshot({ ...preset, fields: { "can-spawn": value } }, context, "off", {}), /can-spawn/);
+});
+
+test("child policy gates fresh spawns and malformed startup flags fail closed", async () => {
+  const agents = join(dir, ".pi/agents"); mkdirSync(agents, { recursive: true });
+  writeFileSync(join(agents, "policy-executor.md"), "---\nname: policy-executor\ncan-spawn: []\n---\nExecutor role");
+  writeFileSync(join(agents, "policy-leader.md"), "---\nname: policy-leader\ncan-spawn: [policy-executor]\n---\nLeader role");
+  try {
+    for (const flags of [{ "swarm-can-spawn": "[]" }, { "swarm-can-spawn": "null" }, { "swarm-can-spawn": "garbage" }, { "swarm-can-spawn": "{}" }, { "swarm-can-spawn": '[1]' }, { "swarm-agent": "policy-executor" }, { "swarm-agent": "missing-role" }]) {
+      reset(); const h = await harness(flags);
+      try {
+        await assert.rejects(h.tool("swarm_spawn", { task: "forbidden" }), /denied|can-spawn/i);
+        await assert.rejects(h.tool("swarm_spawn", { agent: "policy-executor", task: "forbidden" }), /denied|can-spawn/i);
+        assert.equal(calls().some(c => c[1] === "start" || c[1] === "split" || c[1] === "create"), false);
+      } finally { await h.event("session_shutdown", { reason: "reload" }); }
+    }
+    reset(); const flags = { "swarm-agent": "policy-leader" }; const h = await harness(flags);
+    try {
+      await assert.rejects(h.tool("swarm_spawn", { task: "unpreset" }), /denied|can-spawn/i);
+      await assert.rejects(h.tool("swarm_spawn", { agent: "policy-leader", task: "wrong" }), /denied|can-spawn/i);
+      await h.tool("swarm_spawn", { agent: "policy-executor", name: "allowed", task: "work" });
+      const run = h.entries.find(e => e.customType === "swarm_spawn");
+      assert.equal(run.data.snapshot.preset, "policy-executor");
+      assert.deepEqual(run.data.snapshot.canSpawn, []);
+      const args = calls().find(c => c[1] === "start")!;
+      assert.equal(args[args.indexOf("--swarm-can-spawn") + 1], "[]");
+      h.context.sessionManager.resetLeaf(); h.context.sessionManager.appendMessage(fauxAssistantMessage("new branch"));
+      reset({ agents: [{ name: "spawner", agent: "pi", pane_id: "w1:p1", cwd: dir, agent_session: { kind: "path", value: "/parent-session.jsonl" } }] });
+      h.context.sessionManager.appendCustomMessageEntry("swarm_result", "done", true, { spawnEntryId: run.id });
+      const child = SessionManager.open(run.data.session);
+      child.appendMessage({ role: "user", content: "work", timestamp: Date.now() }); child.appendMessage(fauxAssistantMessage("done"));
+      // A changed caller role denies resume; restoring it authorizes the saved preset, not peer name `allowed`.
+      flags["swarm-agent"] = "policy-executor"; await h.event("session_start");
+      await assert.rejects(h.tool("swarm_spawn", { resume: "allowed", task: "forbidden resume" }), /denied|can-spawn/i);
+      assert.equal(calls().some(c => c[1] === "start"), false);
+      flags["swarm-agent"] = "policy-leader"; await h.event("session_start");
+      await h.tool("swarm_spawn", { resume: "allowed", task: "more" });
+      assert.equal(calls().find(c => c[1] === "start")!.includes("--swarm-can-spawn"), true);
+    } finally { await h.event("session_shutdown", { reason: "reload" }); }
+  } finally { rmSync(join(agents, "policy-executor.md")); rmSync(join(agents, "policy-leader.md")); }
+});
+
 test("list does not name the caller; send names it once with a notification", async () => {
   reset({ agents: [{ pane_id: "w1:p1", agent: "pi", cwd: dir }, { name: "peer", pane_id: "w1:p2", agent: "pi", cwd: dir }] });
   const h = await harness({ "swarm-spawner": "parent" });
@@ -264,7 +324,7 @@ test("list does not name the caller; send names it once with a notification", as
     assert.equal(listed.details.presets.length > 0, listed.content[0].text.includes("Presets:"));
     assert.equal(listed.details.self, undefined, "an unnamed caller has no name yet");
     assert.equal(calls().some(c => c[1] === "rename"), false);
-    for (const to of ["peer", "*"]) {
+    for (const to of ["peer", ["peer"]]) {
       const sent = await h.tool("swarm_send", { to, message: "announcement" });
       assert.equal(sent.isError, false);
       assert.deepEqual(sent.details.deliveries, [{ to: "peer", status: "submitted" }]);
@@ -284,7 +344,9 @@ test("send schema requires a recipient and bounded message; sending requires her
   const validate = (args: any) => validateToolArguments(h.tools.get("swarm_send"), { type: "toolCall", id: "test", name: "swarm_send", arguments: args });
   try {
     assert.throws(() => validate({ message: "no recipient" }), /to/);
-    for (const args of [{ to: "", message: "x" }, { to: "peer", message: "" }, { to: "peer", message: "x".repeat(4001) }, { to: "peer", message: "x", from: "impostor" }]) assert.throws(() => validate(args), /Validation failed/);
+    assert.deepEqual(validate({ to: "peer", message: "question", wait: true }), { to: "peer", message: "question", wait: true });
+    assert.throws(() => validate({ to: "peer", message: "question", wait: "yes" }), /Validation failed/);
+    for (const args of [{ to: "", message: "x" }, { to: [], message: "x" }, { to: "*", message: "x" }, { to: ["peer", "*"], message: "x" }, { to: "peer", message: "" }, { to: "peer", message: "x".repeat(4001) }, { to: "peer", message: "x", from: "impostor" }]) assert.throws(() => validate(args), /Validation failed/);
     for (const message of ["", " ", "x".repeat(4001)]) await assert.rejects(h.tool("swarm_send", { to: "peer", message }), /nonempty|4000/);
     const maximum = await h.tool("swarm_send", validate({ to: "peer", message: "x".repeat(4000) }));
     assert.equal(maximum.isError, false);
@@ -314,7 +376,7 @@ test("spawn inherits model and sends tasks verbatim; every run is supervised and
     assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-4.1");
     assert.equal(args.includes("--tools"), false);
     assert.equal(args.includes("--approve"), false);
-    const other = join(dir, "nested");
+    const other = join(dir, "nested"); mkdirSync(other, { recursive: true });
     await h.tool("swarm_spawn", { name: "second", task: "TASK", cwd: other });
     assert.equal((globalThis as any)[PENDING_COUNT_KEY](), 2);
     assert.equal(calls().filter(c => c[1] === "start").at(-1)!.includes("--approve"), false);

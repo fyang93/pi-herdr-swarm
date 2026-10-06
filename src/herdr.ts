@@ -6,15 +6,8 @@ import { realpathSync } from "node:fs";
 export const MESSAGE_LIMIT = 4000;
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 export function validateName(name: string): string {
-  if (!NAME.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
+  if (typeof name !== "string" || name !== name.trim() || !NAME.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
   return name;
-}
-/** An exact name, or a pattern with '*' anywhere (anchored, consecutive stars merged). Names are groups. */
-export function namePattern(address: string): (name: string) => boolean {
-  if (!address.includes("*")) { validateName(address); return name => name === address; }
-  if (!/^[a-z0-9_*-]{1,128}$/.test(address)) throw new Error("Wildcard addresses support only name characters and '*', not '?', brackets or other glob syntax.");
-  const pattern = new RegExp(`^${address.replace(/\*+/g, ".*")}$`);
-  return name => pattern.test(name);
 }
 export function checkMessage(message: string): string {
   if (typeof message !== "string" || !message.trim()) throw new Error("Message must be nonempty.");
@@ -137,34 +130,21 @@ export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
   const rejected = ["agent_not_found", "not_found", "agent_blocked", "agent_not_ready", "invalid_params", "unsupported_agent"].includes(code);
   return { status: rejected ? "rejected" : "unknown", code: typeof code === "string" ? code : undefined, error: String(error) };
 }
-/**
- * Push a message to an exact name (any project) or a '*' pattern (named agents in the same project, not the
- * sender), as native herdr steer (text + Enter). Nothing is stored. Never replays an uncertain submission.
- */
-export async function deliver(input: { from: string; to: string; message: string }, project?: { root: string; roots: Map<string, string> }) {
+/** Push to exact names, without discovery or storage. Never replay an uncertain submission. */
+export async function deliver(input: { from: string; to: string | string[]; message: string }) {
   const message = checkMessage(input.message);
-  const matches = namePattern(input.to);
-  const deliveries: Delivery[] = [];
-  let targets: string[];
-  try {
-    if (input.to.includes("*")) {
-      const scope = project ?? { root: await projectRoot(process.cwd()), roots: new Map<string, string>() };
-      const agents = (await list()).filter(a => a.name && a.name !== input.from && matches(a.name));
-      targets = [];
-      for (const agent of agents) if (await inProject(agent, scope.root, scope.roots)) targets.push(agent.name!);
-    } else targets = [input.to];
-  } catch (error) {
-    return { deliveries, discovery: deliveryOutcome(error) };
-  }
-  const text = `[swarm message] ${validateName(input.from)} → ${input.to}\n${message}`;
-  deliveries.push(...await Promise.all(targets.map(async (to): Promise<Delivery> => {
+  const from = validateName(input.from);
+  const recipients = Array.isArray(input.to) ? input.to : [input.to];
+  if (!recipients.length) throw new Error("At least one recipient is required.");
+  const targets = [...new Set(recipients.map(validateName))];
+  const deliveries = await Promise.all(targets.map(async (to): Promise<Delivery> => {
     // It would land as a new user message in the sender's own session; keep notes in context or in a file.
     if (to === input.from) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
     try {
-      await prompt(to, text);
+      await prompt(to, `[swarm message] ${from} → ${to}\n${message}`);
       return { to, ...deliveryOutcome() };
     } catch (error) { return { to, ...deliveryOutcome(error) }; }
-  })));
+  }));
   return { deliveries };
 }
 

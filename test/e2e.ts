@@ -56,7 +56,7 @@ try {
   const created = await cli(["workspace", "create", "--no-focus", "--label", "swarm-demo", "--cwd", dir, "--env", `PI_CODING_AGENT_DIR=${agentDir}`, "--env", "PI_SWARM_E2E=1"]);
   workspace = created.workspace.workspace_id; pane = created.root_pane.pane_id;
   await startSpawner();
-  const taskA = marker([step("e2e_wait", { file: "start" }), step("swarm_send", { to: "demo-b", message: "A_DIRECT" }), step("swarm_send", { to: "*", message: "A_BROADCAST" }), step("e2e_wait", { file: "finish" })]);
+  const taskA = marker([step("e2e_wait", { file: "start" }), step("swarm_send", { to: "demo-b", message: "A_DIRECT" }), step("swarm_send", { to: ["demo-b", "demo-spawner"], message: "A_GROUP" }), step("e2e_wait", { file: "finish" })]);
   const taskB = marker([step("e2e_wait", { file: "start" }), step("swarm_send", { to: "demo-a", message: "B_DIRECT" }), step("e2e_wait", { file: "finish" })]);
   assert.equal((await invoke("swarm_spawn", { name: "demo-a", task: taskA })).isError, false);
   assert.equal((await invoke("swarm_spawn", { name: "demo-b", task: taskB })).isError, false);
@@ -74,9 +74,18 @@ try {
   const received = (session: string, text: string) => readSession(session).getBranch().some(e => e.type === "message" && e.message.role === "user" && (typeof e.message.content === "string" ? e.message.content : e.message.content.filter(c => c.type === "text").map(c => c.text).join("\n")).includes(text));
   await sleep(3000); // let both peers send while blocked in their wait tool; steers land after it returns
   barrier("finish"); await finish("demo-a"); await finish("demo-b");
-  assert.ok(received(record("demo-b").session, "A_DIRECT") && received(record("demo-b").session, "A_BROADCAST") && received(a.session, "B_DIRECT"), "mutual sends and broadcast");
-  assert.ok(received(file, "A_BROADCAST"), "project announcement also reaches the spawner");
-  console.log("communication: native mutual messages and wildcard announcements passed");
+  assert.ok(received(record("demo-b").session, "A_DIRECT") && received(record("demo-b").session, "A_GROUP") && received(a.session, "B_DIRECT"), "mutual sends and exact recipient array");
+  assert.ok(received(file, "A_GROUP"), "explicit recipients include the spawner");
+  console.log("communication: native mutual messages and exact recipient arrays passed");
+
+  await invoke("swarm_spawn", { name: "wait-peer", task: marker([step("swarm_send", { to: "demo-spawner", message: "WAIT_QUESTION", wait: true })]) });
+  await wait(() => received(file, "WAIT_QUESTION"), "ordinary waiting message");
+  await ready("wait-peer"); await sleep(1200);
+  assert.equal(results("wait-peer").length, 0);
+  assert.equal(readSession(record("wait-peer").session).getBranch().some(e => e.type === "message" && e.message.role === "assistant" && e.message.content.some(c => c.type === "toolCall" && c.name === "swarm_send")), true, "waiting turn ended at swarm_send, not a final assistant reply");
+  await invoke("swarm_send", { to: "wait-peer", message: "WAIT_ANSWER" });
+  await finish("wait-peer");
+  console.log("waiting: ordinary native send parks a peer; ordinary reply resumes and returns its result");
 
   await invoke("swarm_spawn", { name: "monitor", task: marker([step("e2e_wait", { file: "monitor-change" }), step("swarm_send", { to: "demo-spawner", message: "MONITOR_CHANGE" }), step("e2e_wait", { file: "monitor-stop" })]) });
   assert.ok((await live()).some(a => a.name === "monitor"), "a running monitor stays online");

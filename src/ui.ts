@@ -30,27 +30,26 @@ export function agentRow(agent: Pick<LiveAgent, "name" | "pane_id" | "agent_stat
   return `${theme.fg("accent", theme.bold(agent.name || "(unnamed)"))}  ${theme.fg(color, `${icon} ${status}`)}  ${theme.fg("dim", agent.pane_id)}`;
 }
 
-export function waitingView(names: string[], statuses: Map<string, string>, theme: Theme): Component {
+export function runningView(agents: { name: string; agent?: string; pane?: string; status?: string }[], theme: Theme): Component {
   return {
     invalidate() {},
     render(width) {
-      if (width < 1) return [];
-      const shown: string[] = [];
-      for (const name of names) {
-        const label = theme.fg(statuses.get(name) === "blocked" ? "warning" : "accent", name);
-        const remaining = names.length - shown.length - 1;
-        const line = `Waiting: ${[...shown, label].join(", ")}${remaining ? ` (+${remaining})` : ""}`;
-        if (shown.length && visibleWidth(line) > width) break;
-        shown.push(label);
+      if (width < 4 || !agents.length) return [];
+      const inner = width - 2;
+      const border = (text: string) => theme.fg("accent", text);
+      const title = "─ Swarm ";
+      const count = ` ${agents.length} running ─`;
+      const top = visibleWidth(title + count) <= inner ? title + "─".repeat(inner - visibleWidth(title + count)) + count : truncateToWidth(`${agents.length} running`, inner, "").padEnd(inner, "─");
+      const lines = [border(`╭${top}╮`)];
+      for (const agent of agents) {
+        const status = agent.status || "starting";
+        const color = ["blocked", "waiting", "waiting for reply"].includes(status) ? "warning" : ["working", "running"].includes(status) ? "accent" : "dim";
+        const right = ` ${theme.fg(color, status)} `;
+        const left = truncateToWidth(` ${theme.bold(agent.name)}${agent.agent && agent.agent !== agent.name ? ` (${agent.agent})` : ""}`, Math.max(0, inner - visibleWidth(right)));
+        const row = truncateToWidth(left + " ".repeat(Math.max(0, inner - visibleWidth(left) - visibleWidth(right))) + right, inner);
+        lines.push(border("│") + row + " ".repeat(Math.max(0, inner - visibleWidth(row))) + border("│"));
       }
-      // The count of hidden peers stays visible: truncate the names, not the "(+N)".
-      const more = names.length > shown.length ? ` (+${names.length - shown.length})` : "";
-      const room = width - visibleWidth(more);
-      if (room < visibleWidth("Waiting: xx...")) {
-        const total = `Waiting: ${names.length}`;
-        return [truncateToWidth(visibleWidth(total) <= width ? total : String(names.length), width)];
-      }
-      return [truncateToWidth(`Waiting: ${shown.join(", ")}`, room) + more];
+      return [...lines, border(`╰${"─".repeat(inner)}╯`)];
     },
   };
 }
@@ -69,18 +68,18 @@ export const spawnResult: Renderer = (result, options, theme, context) => result
   return textLines(data ? theme.fg("accent", theme.bold(data.name)) + theme.fg("dim", ` · ${data.resumed ? "resumed" : "started"} · ${data.pane}`) : theme.fg("toolOutput", output(result)), width);
 });
 export const sendResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
-  const data = result.details as { deliveries: Delivery[]; discovery?: Omit<Delivery, "to"> } | undefined;
+  const data = result.details as { deliveries: Delivery[]; wait?: boolean } | undefined;
   if (!Array.isArray(data?.deliveries)) return textLines(theme.fg(context.isError ? "error" : "toolOutput", output(result)), width);
   const count = (status: Delivery["status"]) => data.deliveries.filter(d => d.status === status).length;
   const lines = textLines(theme.fg("dim", `${data.deliveries.length} recipients · ${count("submitted")} submitted · ${count("rejected")} rejected · ${count("unknown")} unknown`), width);
+  if (data.wait) lines.push(...textLines(theme.fg("warning", "Waiting for reply"), width));
   for (const delivery of data.deliveries) {
     const color = delivery.status === "submitted" ? "success" : delivery.status === "rejected" ? "error" : "warning";
     const icon = delivery.status === "submitted" ? "✓" : delivery.status === "rejected" ? "✗" : "?";
     lines.push(...textLines(`${theme.fg(color, `${icon} ${delivery.status}`)} → ${theme.fg("accent", delivery.to)}${delivery.code ? theme.fg("dim", ` [${delivery.code}]`) : ""}`, width));
     if (delivery.error) lines.push(...textLines(theme.fg(color, delivery.error), width));
   }
-  if (data.discovery) lines.push(...textLines(theme.fg("warning", `Recipient discovery ${data.discovery.status}${data.discovery.code ? ` [${data.discovery.code}]` : ""}: ${data.discovery.error}`), width));
-  else if (!data.deliveries.length) lines.push(...textLines(theme.fg("warning", "No matching named agents to notify."), width));
+  if (!data.deliveries.length) lines.push(...textLines(theme.fg("warning", "No recipients to notify."), width));
   return lines;
 });
 export const listResult: Renderer = (result, options, theme, context) => resultView(options.expanded, context.isPartial, theme, width => {
@@ -97,20 +96,27 @@ export const listResult: Renderer = (result, options, theme, context) => resultV
   return lines;
 });
 
+// Box padding can overflow at one column; keep custom messages safe on tiny terminals.
+function fitBox(box: Box): Component {
+  return { invalidate: () => box.invalidate(), render: width => width < 1 ? [] : box.render(width).map(line => truncateToWidth(line, width)) };
+}
+
 export function resultMessageView(content: string, details: { name: string; session: string; status: string } | undefined, expanded: boolean, theme: Theme): Component {
-  const box = new Box(1, 1, line => theme.bg("customMessageBg", line));
+  const failed = details?.status === "error" || details?.status === "unreadable";
+  const replied = details?.status === "reply";
+  const box = new Box(1, 1, line => theme.bg(failed ? "toolErrorBg" : replied ? "toolSuccessBg" : "customMessageBg", line));
   box.addChild({ invalidate() {}, render(width) {
     if (width < 1) return [];
-    const color = details?.status === "error" || details?.status === "unreadable" ? "error" : details?.status === "reply" ? "dim" : "warning";
-    const header = theme.fg("toolTitle", theme.bold("result ")) + theme.fg("accent", details?.name || "peer") + theme.fg(color, ` · ${details?.status || "unknown"}`);
-    const body = details ? content.split("\n").slice(2).join("\n") : content;
+    const color = failed ? "error" : replied ? "success" : "warning";
+    const header = theme.fg(color, failed ? "✗ " : replied ? "✓ " : "⚠ ") + theme.fg("toolTitle", theme.bold(details?.name || "peer")) + theme.fg(color, ` · ${details?.status || "unknown"}`);
+    const body = details && content.startsWith("[swarm result] ") ? content.split("\n").slice(2).join("\n") : content;
     return bounded([...textLines(header, width), ...new Markdown(body, 0, 0, getMarkdownTheme(), { color: text => theme.fg("toolOutput", text) }).render(width), ...textLines(theme.fg("dim", details?.session || ""), width)], width, expanded);
   } });
-  return box;
+  return fitBox(box);
 }
 
 export function noticeView(text: string, expanded: boolean, theme: Theme): Component {
   const box = new Box(1, 1, line => theme.bg("customMessageBg", line));
   box.addChild({ invalidate() {}, render: width => width < 1 ? [] : bounded(textLines(theme.fg("warning", text), width), width, expanded) });
-  return box;
+  return fitBox(box);
 }

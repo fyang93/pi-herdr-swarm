@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { realpath } from "node:fs/promises";
 import { MESSAGE_LIMIT, availableName, currentPane, deliver, checkPiIntegration, sessionBinding, identity, list, projectRoot, requireHerdr, start, validateName } from "./herdr.ts";
-import { loadout, presets, requiredTools, snapshot } from "./presets.ts";
+import { loadout, presets, requiredTools, snapshot, spawnPolicy, checkSpawn } from "./presets.ts";
 import { lifecycle, readSession } from "./run.ts";
 import { callView, spawnResult, sendResult, listResult, noticeView, resultMessageView } from "./ui.ts";
 
@@ -23,16 +23,17 @@ export default function swarm(pi: ExtensionAPI) {
     return value as number;
   }
   let project: string | undefined;
-  const roots = new Map<string, string>();
   function projectScope() {
     if (!project) throw new Error("Swarm project unavailable; check the session startup error.");
-    return { root: project, roots };
+    return project;
   }
   const name = (context: ExtensionContext) => identity(value => context.ui.notify(`This session is now named ${value}`, "info"));
   // `pi --swarm-agent <preset>` starts any session as that preset, e.g. when a host launches it outside swarm_spawn.
   pi.registerFlag("swarm-agent", { type: "string", description: "Start this session as a swarm preset: its model, thinking and role." });
   pi.registerFlag("swarm-tools", { type: "string", description: "Internal: tools a swarm preset requires, activated at session start." });
+  pi.registerFlag("swarm-can-spawn", { type: "string", description: "Internal: saved preset spawn allowlist (JSON)." });
   let role: string | undefined;
+  let canSpawn: string[] | undefined;
   /** Activate a preset's required tools; one that does not become active (unregistered, hidden) is reported, not fatal. */
   function requireTools(names: string[], context: ExtensionContext) {
     const add = names.filter(name => !pi.getActiveTools().includes(name));
@@ -43,22 +44,27 @@ export default function swarm(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, context) => {
     requireTools(requiredTools(pi.getFlag("swarm-tools")), context);
     project = undefined;
-    roots.clear();
     void checkPiIntegration(message => context.ui.notify(message, "warning"));
     project = await projectRoot(context.cwd);
+    role = undefined;
+    canSpawn = undefined;
     const agent = pi.getFlag("swarm-agent");
-    if (typeof agent !== "string" || !agent) return;
+    const policy = pi.getFlag("swarm-can-spawn");
+    if (policy !== undefined || (typeof agent === "string" && agent)) canSpawn = []; // fail closed on invalid role configuration
     try {
+      if (policy !== undefined) canSpawn = spawnPolicy(JSON.parse(String(policy)));
+      if (typeof agent !== "string" || !agent) return;
       const preset = presets(context.cwd, context.isProjectTrusted()).find(p => p.name === agent);
       if (!preset) throw new Error(`no preset named ${agent}`);
       const config = await snapshot(preset, context, pi.getThinkingLevel(), {});
+      canSpawn = config.canSpawn;
       const [provider, ...id] = config.model.split("/");
       const model = context.modelRegistry.find(provider, id.join("/"));
       if (!model || !await pi.setModel(model)) throw new Error(`model ${config.model} unavailable`);
       pi.setThinkingLevel(config.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
       role = config.prompt;
       requireTools(config.tools ?? [], context);
-    } catch (error) { try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
+    } catch (error) { canSpawn = []; try { context.ui.notify(`swarm: ${error instanceof Error ? error.message : error}`, "error"); } catch { /* session already replaced */ } }
   });
   const runState = lifecycle(pi);
   pi.on("before_agent_start", (event, context) => {
@@ -115,6 +121,7 @@ export default function swarm(pi: ExtensionAPI) {
       const spawner = await name(context);
       const history = runState.history();
       const known = `Known names: ${[...history.keys()].join(", ") || "(none)"}`;
+      checkSpawn(canSpawn, params.resume !== undefined ? history.get(params.resume)?.snapshot.preset : params.agent);
       const { peer, config, session, boundary } = params.resume !== undefined
         ? await prepareResume(params, history, known)
         : await prepareSpawn(params, history, known, context);
@@ -138,21 +145,21 @@ export default function swarm(pi: ExtensionAPI) {
     renderResult: spawnResult,
   });
   pi.registerTool({
-    name: "swarm_send", label: "Swarm send",
-    description: "Send a message to another agent for updates, questions, decisions, or follow-up work. Call this tool directly, not as a shell command. `to` accepts an exact name or a name pattern using `*` as a wildcard; wildcard matches stay within this project and exclude the sender. Use '*' to announce to all other named agents in this project.",
-    parameters: Type.Object({ message: Type.String(messageLimit), to: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
+    name: "swarm_send", label: "Swarm send", executionMode: "sequential",
+    description: "Send a message to named peers. Call this tool directly, not as a shell command. `to` is an exact name or an array of exact names; each recipient's submission result is reported separately. No wildcards or broadcasts. Set wait:true to stop this turn and keep this session open until a submitted recipient replies with ordinary swarm_send. With multiple recipients, the first reply resumes you. Call directly, not inside scripts, when using wait:true.",
+    parameters: Type.Object({ message: Type.String(messageLimit), to: Type.Union([Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9_-]{0,31}$" }), Type.Array(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9_-]{0,31}$" }), { minItems: 1 })]), wait: Type.Optional(Type.Boolean({ description: "Stop and wait for a recipient's reply; do not auto-exit." })) }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, context) {
       requireHerdr();
+      if (params.wait && _id.includes("/")) throw new Error("wait:true must be called directly, not from another tool.");
       const from = await name(context);
-      const result = await deliver({ from, to: params.to, message: params.message }, projectScope());
-      const failed = !!result.discovery || result.deliveries.some(d => d.status !== "submitted");
+      const result = await deliver({ from, to: params.to, message: params.message });
+      const failed = result.deliveries.some(d => d.status !== "submitted");
       const lines = result.deliveries.map(d => `${d.status} → ${d.to}${d.code ? ` [${d.code}]` : ""}${d.error ? `: ${d.error}` : ""}`);
-      if (result.discovery) lines.push(`Recipient discovery ${result.discovery.status}${result.discovery.code ? ` [${result.discovery.code}]` : ""}: ${result.discovery.error}`);
-      else if (!result.deliveries.length) lines.push("No matching named agents.");
-      return textResult(`${result.deliveries.length} recipients\n${lines.join("\n")}`, result, failed);
+      const wait = !!params.wait && result.deliveries.some(d => d.status === "submitted");
+      return { ...textResult(`${result.deliveries.length} recipients\n${lines.join("\n")}${wait ? "\nStop and wait for a recipient's reply via swarm_send." : ""}`, { ...result, wait }, failed), ...(wait ? { terminate: true } : {}) };
     },
     renderCall(args, theme, context) {
-      const title = theme.fg("toolTitle", theme.bold("send")) + theme.fg("dim", " → ") + theme.fg("accent", args.to || "…");
+      const title = theme.fg("toolTitle", theme.bold("send")) + theme.fg("dim", " → ") + theme.fg("accent", Array.isArray(args.to) ? args.to.join(", ") : args.to || "…") + (args.wait ? theme.fg("dim", " · waiting for reply") : "");
       return callView(title, args.message || "", context.expanded, theme);
     },
     renderResult: sendResult,

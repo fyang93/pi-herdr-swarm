@@ -4,7 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { MESSAGE_LIMIT, list, sessionBinding, sessionPath, type LiveAgent } from "./herdr.ts";
 import type { Snapshot } from "./presets.ts";
-import { waitingView } from "./ui.ts";
+import { runningView } from "./ui.ts";
 
 export interface Run { name: string; pane: string; session: string; boundary: string | null; snapshot: Snapshot }
 export const PENDING_COUNT_KEY = Symbol.for("pi-herdr-swarm/pending-count");
@@ -44,7 +44,9 @@ export function finalSummary(message: any, session: string): string {
 
 export function readResult(run: Pick<Run, "name" | "session" | "boundary">) {
   try {
-    const reply = lastReply(readSession(run.session), run.boundary);
+    const manager = readSession(run.session);
+    if (waitingForReply(manager).length) return { text: "Session ended while waiting for a reply; this is not a final result.", status: "incomplete" };
+    const reply = lastReply(manager, run.boundary);
     // toolUse: the session ended mid-turn, e.g. its pane was closed during a tool.
     const status = !reply ? "empty" : wasAborted(reply) ? "aborted" : reply.stopReason === "error" ? "error" : reply.stopReason === "toolUse" ? "incomplete" : "reply";
     return { text: finalSummary(reply, run.session), status };
@@ -55,6 +57,29 @@ export function readResult(run: Pick<Run, "name" | "session" | "boundary">) {
 
 const resultId = (entry: any): string | undefined =>
   entry.type === "custom_message" && entry.customType === "swarm_result" ? entry.details?.spawnEntryId : undefined;
+/** Waiting is reconstructed from this branch's ordinary send results and incoming messages. */
+export function waitingForReply(manager: Pick<SessionManager, "getBranch">): string[] {
+  const branch = manager.getBranch();
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "swarm_send") continue;
+    const details = entry.message.details as { wait?: boolean; deliveries?: { to: string; status: string }[] } | undefined;
+    if (!details?.wait) continue;
+    const recipients = details.deliveries?.filter(d => d.status === "submitted").map(d => d.to) ?? [];
+    if (!recipients.length) continue;
+    // A reply can be steered while submission is in flight, before its tool result is persisted.
+    const toolCallId = entry.message.toolCallId;
+    const call = branch.findIndex(e => e.type === "message" && e.message.role === "assistant" && e.message.content.some(c => c.type === "toolCall" && c.id === toolCallId));
+    const replied = branch.slice(call < 0 ? i + 1 : call + 1).some(e => {
+      if (e.type !== "message" || e.message.role !== "user") return false;
+      const text = typeof e.message.content === "string" ? e.message.content : e.message.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+      const from = /^\[swarm message\] ([a-z][a-z0-9_-]{0,31}) → /.exec(text)?.[1];
+      return !!from && recipients.includes(from);
+    });
+    return replied ? [] : recipients;
+  }
+  return [];
+}
 
 /**
  * Runs on the active branch whose result is not archived anywhere in the session (a result is
@@ -99,10 +124,12 @@ export function lifecycle(pi: ExtensionAPI) {
   const launching = new Set<string>();
   // A message awaits a safe boundary; undefined means it has already been submitted to pi.
   let delivery = { written: new Map<string, ReturnType<typeof resultMessage> | undefined>(), cancelled: false };
+  const awaitingReply = () => !!ctx && waitingForReply(ctx.sessionManager).length > 0;
   const blocked = new Set<string>();
+  const waitingPeers = new Map<string, string[]>();
 
   const pending = () => pendingRuns(ctx!.sessionManager);
-  const pendingCount = () => ctx ? pendingRuns(ctx.sessionManager, true).size : 0;
+  const pendingCount = () => ctx ? pendingRuns(ctx.sessionManager, true).size + Number(awaitingReply()) : 0;
 
   /** Launched by swarm with these flags, and still on the session it was launched with. */
   function eligible(context: ExtensionContext): boolean {
@@ -121,8 +148,10 @@ export function lifecycle(pi: ExtensionAPI) {
     if (ctx?.mode !== "tui") return;
     // Only peers still running: collected results await a safe boundary, even if not yet answered.
     const waiting = [...pending()].filter(([id]) => !delivery.written.has(id));
-    const statuses = new Map(waiting.filter(([id]) => blocked.has(id)).map(([, run]) => [run.name, "blocked"]));
-    ctx.ui.setWidget("swarm", waiting.length ? (_tui, theme) => waitingView(waiting.map(([, run]) => run.name), statuses, theme) : undefined);
+    const agents = waiting.map(([id, run]) => ({ name: run.name, agent: run.snapshot.preset, pane: run.pane, status: waitingPeers.get(id)?.length ? `waiting for reply: ${waitingPeers.get(id)!.join(", ")}` : blocked.has(id) ? "blocked" : "running" }));
+    const recipients = waitingForReply(ctx.sessionManager);
+    if (recipients.length) agents.unshift({ name: String(flag("name") || "self"), agent: undefined, pane: "", status: `waiting for reply: ${recipients.join(", ")}` });
+    ctx.ui.setWidget("swarm", agents.length ? (_tui, theme) => runningView(agents, theme) : undefined);
   }
 
   function cancelExit() {
@@ -172,7 +201,7 @@ export function lifecycle(pi: ExtensionAPI) {
     for (const [index, { type: _type, ...message }] of entries.entries()) {
       if (!active || ctx !== current || !current.isIdle()) break;
       delivery.written.set(message.details.spawnEntryId, undefined);
-      pi.sendMessage(message, { triggerTurn: triggerTurn && index === entries.length - 1 });
+      pi.sendMessage(message, { triggerTurn: triggerTurn && !awaitingReply() && index === entries.length - 1 });
     }
   }
 
@@ -181,12 +210,13 @@ export function lifecycle(pi: ExtensionAPI) {
     const entries = readyResults().filter(entry => !proposed.has(entry.details.spawnEntryId));
     if (!entries.length) return;
     // Keep payloads until pi persists them: later handlers can replace these drafts.
-    return { entries: [...event.entries, ...entries], ...(event.outcome === "completed" && !delivery.cancelled ? { continue: true } : {}) };
+    return { entries: [...event.entries, ...entries], ...(event.outcome === "completed" && !delivery.cancelled && !awaitingReply() ? { continue: true } : {}) };
   }
 
   function supervise(id: string, run: Run, agents: LiveAgent[]) {
     const agent = sessionBinding(agents, run.session); // throws while bindings are uncertain: keep waiting
     if (!agent) return archive(id, run);
+    waitingPeers.set(id, waitingForReply(readSession(run.session)));
     if (agent.agent_status !== "blocked") return void blocked.delete(id);
     if (!blocked.has(id)) pi.sendMessage({ customType: "swarm_notice", content: `${run.name} is blocked in pane ${agent.pane_id}.`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
     blocked.add(id);
@@ -233,6 +263,7 @@ export function lifecycle(pi: ExtensionAPI) {
     delivery = previous?.session === session ? previous.state : { written: new Map(), cancelled: false };
     (globalThis as any)[DELIVERY_KEY] = { session, state: delivery };
     blocked.clear();
+    waitingPeers.clear();
     (globalThis as any)[PENDING_COUNT_KEY] = pendingCount;
     if (context.mode === "tui") stopWatchingKeys = context.ui.onTerminalInput(data => {
       if (getKeybindings().matches(data, "app.interrupt")) { delivery.cancelled = true; cancelExit(); }
@@ -245,6 +276,7 @@ export function lifecycle(pi: ExtensionAPI) {
     }
   });
   pi.on("input", () => { delivery.cancelled = false; cancelExit(); });
+  pi.on("tool_call", () => awaitingReply() ? { block: true, terminate: true, reason: "Waiting for a reply; stop here." } : undefined);
   pi.on("message_start", (event, context) => {
     cancelExit();
     // A deferred result wake can outlive Escape and /tree; identify our message, not the active branch.
@@ -254,7 +286,11 @@ export function lifecycle(pi: ExtensionAPI) {
     }
   });
   pi.on("agent_start", () => { outcome = undefined; });
-  pi.on("turn_end", resultBoundary);
+  pi.on("turn_end", (event, context) => {
+    // Mixed tool batches may contain non-terminating results: still stop after wait:true.
+    if (awaitingReply() && !context.hasPendingMessages()) context.abort();
+    return resultBoundary(event);
+  });
   pi.on("agent_before_settle", event => { outcome = event.outcome; return resultBoundary(event); });
   pi.on("agent_settled", () => {
     // A result may arrive while another before-settle handler awaits; pi defers this turn until settlement finishes.

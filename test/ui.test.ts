@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { initTheme, keyHint, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { Box, visibleWidth, KeybindingsManager, type Component } from "@earendil-works/pi-tui";
 import swarm from "../src/index.ts";
-import { agentRow, noticeView, waitingView } from "../src/ui.ts";
+import { agentRow, noticeView, runningView, resultMessageView } from "../src/ui.ts";
 
 initTheme("dark", false);
 // Configure the host's instance (npm can install a separate peer copy for local tests).
@@ -13,7 +13,7 @@ const hostTui = await import(createRequire(import.meta.resolve("@earendil-works/
 const originalKeys = hostTui.getKeybindings();
 hostTui.setKeybindings(new KeybindingsManager({ "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle output" } }, { "app.tools.expand": "ctrl+e" }));
 after(() => hostTui.setKeybindings(originalKeys));
-const palette: Record<string, number> = { toolTitle: 33, accent: 39, dim: 244, success: 40, warning: 214, error: 196, toolOutput: 252, customMessageBg: 236 };
+const palette: Record<string, number> = { toolTitle: 33, accent: 39, dim: 244, success: 40, warning: 214, error: 196, toolOutput: 252, customMessageBg: 236, toolSuccessBg: 22, toolErrorBg: 52 };
 const backgrounds: string[] = [];
 const theme: any = {
   fg: (color: string, text: string) => `\x1b[38;5;${palette[color]}m${text}\x1b[39m`,
@@ -31,7 +31,7 @@ const rendered = (value: any, expanded = false, flags: any = {}, tool = "swarm_s
 test("each tool call names its action and objects; only expanded calls show full body", () => {
   const cases: [string, any, RegExp][] = [
     ["swarm_spawn", { agent: "worker", name: "auth-review", task: "First preview\nSECOND_FULL_LINE" }, /spawn worker → auth-review/],
-    ["swarm_send", { to: "*news*", message: "First preview\nSECOND_FULL_LINE" }, /send → \*news\*/],
+    ["swarm_send", { to: ["researcher", "reviewer"], message: "First preview\nSECOND_FULL_LINE" }, /send → researcher, reviewer/],
     ["swarm_list", {}, /list · agents \+ presets/],
     ["swarm_send", {}, /send → …/],
     ["swarm_spawn", { task: "First preview\nSECOND_FULL_LINE" }, /spawn inherited → …/],
@@ -53,7 +53,7 @@ test("each tool call names its action and objects; only expanded calls show full
 
 test("result flags come from the fourth context argument; tools never add an inner Box", () => {
   backgrounds.length = 0;
-  assert.equal(new Set([...tools.values()].map(t => t.renderResult)).size, 3);
+  assert.equal(new Set(["swarm_spawn", "swarm_send", "swarm_list"].map(name => tools.get(name).renderResult)).size, 3);
   for (const tool of ["swarm_spawn", "swarm_send", "swarm_list"]) {
     const failed = rendered(result("Explicit failure"), false, { isError: true }, tool);
     assert.ok(!(failed instanceof Box));
@@ -105,8 +105,11 @@ test("send distinguishes submitted/rejected/unknown", () => {
   assert.match(lines.join(""), /\x1b\[38;5;214m\? unknown/);
   assert.match(lines.join(""), /\x1b\[38;5;196mherdr agent_blocked/);
   assert.doesNotMatch(output, /read|acknowledged/, "submission is not acknowledgement");
+  const waiting = rendered(result("wire", { deliveries: [{ to: "peer", status: "submitted" }], wait: true }));
+  assert.match(plain(waiting.render(80)), /Waiting for reply/);
+  assert.match(waiting.render(80).join(""), /\x1b\[38;5;214mWaiting for reply/);
   const empty = rendered(result("wire", { deliveries: [] }));
-  assert.match(plain(empty.render(80)), /No matching named agents/);
+  assert.match(plain(empty.render(80)), /No recipients/);
   for (const expanded of [false, true]) for (const width of [1, 4, 8, 20, 80]) {
     const lines = rendered(result("wire", { deliveries: [] }), expanded).render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width));
@@ -114,7 +117,7 @@ test("send distinguishes submitted/rejected/unknown", () => {
   }
 });
 
-test("list preserves actual statuses; waiting widget is a single warning-aware line", () => {
+test("list preserves actual statuses", () => {
   for (const [status, icon, color] of [["working", "●", 39], ["idle", "○", 244], ["blocked", "⚠", 214], ["done", "○", 244], ["unknown", "⚠", 214], ["unlisted", "⚠", 214]] as const) {
     const row = agentRow({ name: "peer", pane_id: "w1:p9", agent_status: status }, theme);
     assert.match(stripVTControlCharacters(row), new RegExp(`${icon} ${status}`));
@@ -131,10 +134,39 @@ test("list preserves actual statuses; waiting widget is a single warning-aware l
   const emptyPresets = rendered(result("wire", { agents: [], presets: [] }), true, {}, "swarm_list");
   assert.doesNotMatch(plain(emptyPresets.render(100)), /Presets/);
   assert.match(plain(emptyPresets.render(100)), /0 agents · 0 presets/);
-  const widget = waitingView(["研究员", "reviewer", "writer", "another"], new Map([["研究员", "blocked"]]), theme);
-  assert.match(widget.render(80)[0], /\x1b\[38;5;214m研究员/);
-  assert.match(plain(widget.render(24)), /Waiting: 研究员 \(\+3\)/);
-  for (const width of [1, 4, 8, 20, 80]) { const lines = widget.render(width); assert.equal(lines.length, 1); assert.ok(visibleWidth(lines[0]) <= width); }
+});
+
+test("running widget ports bordered name, preset and warning status using the active theme", () => {
+  const widget = runningView([
+    { name: "研究员", agent: "researcher", status: "working" },
+    { name: "reviewer", status: "waiting" },
+  ], theme);
+  const lines = widget.render(80);
+  assert.match(plain(lines), /Swarm.*2 running/);
+  assert.match(plain(lines), /研究员 \(researcher\).*working/);
+  assert.match(lines.join("\n"), /\x1b\[38;5;214mwaiting/);
+  assert.ok(lines.every(line => visibleWidth(line) === 80));
+  for (const width of [0, 1, 3, 4, 8, 20]) {
+    assert.ok(widget.render(width).every(line => visibleWidth(line) <= width));
+  }
+  assert.deepEqual(runningView([], theme).render(80), []);
+  const oldAccent = palette.accent;
+  palette.accent = 99;
+  widget.invalidate();
+  assert.match(widget.render(80).join(""), /\x1b\[38;5;99m/);
+  palette.accent = oldAccent;
+});
+
+test("result messages retain full Markdown on expansion and truthful status colors", () => {
+  for (const [status, bg, icon] of [["reply", "toolSuccessBg", "✓"], ["error", "toolErrorBg", "✗"], ["aborted", "customMessageBg", "⚠"], ["unreadable", "toolErrorBg", "✗"]]) {
+    backgrounds.length = 0;
+    const component = resultMessageView("[swarm result] peer\nSession: /tmp/session\n**Answer**\n" + "正文\n".repeat(20), { name: "peer", session: "/tmp/session", status }, false, theme);
+    assert.match(plain(component.render(80)), new RegExp(`${icon} peer · ${status}`));
+    assert.ok(backgrounds.includes(bg));
+    assert.match(plain(component.render(80)), /ctrl\+e to expand/);
+    for (const width of [0, 1, 4, 8, 20, 80]) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
+  }
+  assert.match(plain(resultMessageView("Do not drop\nthese lines\nAnswer", { name: "peer", session: "", status: "reply" }, true, theme).render(80)), /Do not drop\s+these lines/);
 });
 
 test("native validation details are not mistaken for delivery details", () => {
