@@ -58,7 +58,7 @@ else if (key === 'agent start') {
 } else if (key === 'agent prompt') {
   const finish = () => {
     if (state.promptError || args[2] === 'blocked') fail(state.promptError || 'agent_blocked', 'prompt failed');
-    if (!state.agents.some(a => a.name === args[2])) fail('agent_not_found', 'not online');
+    if (!state.agents.some(a => a.name === args[2] || a.pane_id === args[2])) fail('agent_not_found', 'not online');
     ok({ type: 'agent_prompted' });
   };
   if (state.delay) setTimeout(finish, state.delay); else finish();

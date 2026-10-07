@@ -6,6 +6,13 @@ import { realpathSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 export const MESSAGE_LIMIT = 4000;
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+// Herdr owns target syntax; we only prohibit whitespace and wildcard recipients.
+export const TARGET_PATTERN = "^[^\\s*?\\[\\]]+$";
+const TARGET = new RegExp(TARGET_PATTERN);
+function validateTarget(target: string): string {
+  if (typeof target !== "string" || !TARGET.test(target)) throw new Error("Recipients must be exact agent names or pane IDs.");
+  return target;
+}
 export function validateName(name: string): string {
   if (typeof name !== "string" || name !== name.trim() || !NAME.test(name)) throw new Error("Agent names must match [a-z][a-z0-9_-]{0,31}.");
   return name;
@@ -140,7 +147,7 @@ export function summary(text: string): string {
   return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
-export interface Delivery { to: string; status: "submitted" | "resumed" | "rejected" | "unknown"; code?: string; error?: string }
+export interface Delivery { to: string; replyFrom?: string; status: "submitted" | "resumed" | "rejected" | "unknown"; code?: string; error?: string }
 export function deliveryOutcome(error?: unknown): Omit<Delivery, "to"> {
   if (error === undefined) return { status: "submitted" };
   const code = error instanceof HerdrError ? error.code : (error as any)?.code;
@@ -156,20 +163,24 @@ export async function deliver(input: { from: string; to: string | string[]; mess
   const from = validateName(input.from);
   const recipients = Array.isArray(input.to) ? input.to : [input.to];
   if (!recipients.length) throw new Error("At least one recipient is required.");
-  const targets = [...new Set(recipients.map(validateName))];
+  const targets = [...new Set(recipients.map(validateTarget))];
   const deliveries = await Promise.all(targets.map(async (to): Promise<Delivery> => {
     // It would land as a new user message in the sender's own session; keep notes in context or in a file.
     if (to === input.from) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
     try {
-      const session = input.sessions?.get(to);
+      const paneTarget = to.includes(":");
+      const targetOwner = paneTarget ? await get(to) : undefined;
+      if (paneTarget && (await get(from))?.pane_id === to) return { to, status: "rejected", code: "self", error: "cannot message yourself" };
+      const session = input.sessions?.get(to) ?? (targetOwner?.name ? input.sessions?.get(targetOwner.name) : undefined);
       if (session) {
-        const owner = await get(to);
+        const owner = targetOwner ?? await get(to);
         if (!owner) return { to, status: "rejected", code: "agent_not_found", error: "Peer is offline." };
         if (!hasSessionPath(owner)) return { to, status: "rejected", code: "session_unknown", error: `Session binding unknown for ${to}; cannot deliver.` };
         if (sessionPath(owner.agent_session!.value) !== sessionPath(session)) return { to, status: "rejected", code: "session_mismatch", error: `Name ${to} is occupied by another session (名字已被其他会话占用); expected ${session}.` };
       }
       await prompt(to, messageText(from, to, message, input.wait));
-      return { to, ...deliveryOutcome() };
+      // ponytail: alias snapshot; include stable sender pane IDs if rename-safe waits become necessary.
+      return { to, ...(input.wait && targetOwner?.name ? { replyFrom: targetOwner.name } : {}), ...deliveryOutcome() };
     } catch (error) { return { to, ...deliveryOutcome(error) }; }
   }));
   return { deliveries };

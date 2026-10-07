@@ -26,7 +26,7 @@ swarm_list();
 | Tool | Does |
 |---|---|
 | `swarm_spawn({task, agent?, name?, model?, cwd?})` | Starts a fresh pi in a new pane and returns immediately. Select a preset role with `agent`, or describe the role in `task`. The peer stays running while its task runs, then exits and returns its final reply. Communicate with `swarm_send` during the task. Close its pane to stop it. |
-| `swarm_send({message, to, wait?})` | Requires `to`: an exact name or a nonempty array of exact names (any project). No wildcards, recipient discovery, or broadcast. No separate message store. Reports each recipient as `submitted`, `resumed`, `rejected` or `unknown`. If herdr reports `agent_not_found` for your archived, ended spawned peer, resumes its session with the message as its new task, preserving full context and saved configuration. Other rejection reasons are unchanged. |
+| `swarm_send({message, to, wait?})` | Requires `to`: an exact agent name, pane ID (e.g. `w5:pWB`), or a nonempty array of these (any project). Pane IDs address online panes only; offline resume requires the saved peer name. Waiting also accepts the target's name observed at submission; renaming a recipient during a wait is not tracked. No wildcards, recipient discovery, or broadcast. No separate message store. Reports each recipient as `submitted`, `resumed`, `rejected` or `unknown`. If herdr reports `agent_not_found` for your archived, ended spawned peer, resumes its session with the message as its new task, preserving full context and saved configuration. Other rejection reasons are unchanged. |
 | `swarm_list()` | Your name, online agents (`name · role/task · state · pane` when a pane title exists), and available presets. |
 
 ## Online identity
@@ -105,4 +105,5 @@ In pi's own settings, global `~/.pi/agent/settings.json` or project `.pi/setting
 npm install --ignore-scripts
 npm run check && npm test
 node test/e2e.ts   # inside herdr: a private server, no model requests
+node test/e2e-pane-address.ts # production pane/name wait + experimental unnamed-host round trip
 ```

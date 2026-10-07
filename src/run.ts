@@ -79,19 +79,21 @@ export function waitingForReply(manager: Pick<SessionManager, "getBranch">, inco
   for (let i = branch.length - 1; i >= 0; i--) {
     const entry = branch[i];
     if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "swarm_send") continue;
-    const details = entry.message.details as { wait?: boolean; deliveries?: { to: string; status: string }[] } | undefined;
+    const details = entry.message.details as { wait?: boolean; deliveries?: { to: string; replyFrom?: string; status: string }[] } | undefined;
     if (!details?.wait) continue;
-    const recipients = details.deliveries?.filter(d => d.status === "submitted" || d.status === "resumed").map(d => d.to) ?? [];
+    const deliveries = details.deliveries?.filter(d => d.status === "submitted" || d.status === "resumed") ?? [];
+    const recipients = deliveries.map(d => d.to);
+    const replySources = deliveries.flatMap(d => d.replyFrom ? [d.to, d.replyFrom] : [d.to]);
     if (!recipients.length) continue;
     // A reply can be steered while submission is in flight, before its tool result is persisted.
     const toolCallId = entry.message.toolCallId;
     const call = branch.findIndex(e => e.type === "message" && e.message.role === "assistant" && e.message.content.some(c => c.type === "toolCall" && c.id === toolCallId));
     const replied = [...branch.slice(call < 0 ? i + 1 : call + 1), ...incoming].some(e => {
-      if (e.type === "custom_message" && e.customType === "swarm_result") return recipients.includes((e.details as { name?: string } | undefined)?.name ?? "");
+      if (e.type === "custom_message" && e.customType === "swarm_result") return replySources.includes((e.details as { name?: string } | undefined)?.name ?? "");
       if (e.type !== "message" || !("message" in e) || e.message.role !== "user") return false;
       const text = typeof e.message.content === "string" ? e.message.content : e.message.content.filter(c => c.type === "text").map(c => c.text).join("\n");
-      const from = /^\[swarm message\] ([a-z][a-z0-9_-]{0,31}) → /.exec(text)?.[1];
-      return !text.startsWith("[swarm message]") || !!from && recipients.includes(from);
+      const from = /^\[swarm message\] (\S+) → /.exec(text)?.[1];
+      return !text.startsWith("[swarm message]") || !!from && replySources.includes(from);
     });
     return replied ? [] : recipients;
   }

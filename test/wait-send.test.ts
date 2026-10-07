@@ -63,6 +63,22 @@ for (const auto of [true, false]) test(auto ? "wait:true parks a spawned peer af
   } finally { await r.close(); }
 });
 
+test("pane-addressed wait preserves its target and accepts a named reply after reload", async () => {
+  state();
+  const r = await runtime();
+  try {
+    r.faux.setResponses([waitCall("w1:p2")]);
+    await r.session.prompt("ask by pane");
+    assert.deepEqual(waitingForReply(r.session.sessionManager), ["w1:p2"]);
+    await r.session.reload();
+    assert.deepEqual(waitingForReply(r.session.sessionManager), ["w1:p2"]);
+    r.faux.setResponses([fauxAssistantMessage("Complete result.")]);
+    await r.session.prompt(nativeReply("peer"), { source: "rpc", expandPromptTemplates: false });
+    assert.deepEqual(waitingForReply(r.session.sessionManager), []);
+    assert.deepEqual(r.errors, []);
+  } finally { await r.close(); }
+});
+
 test("a mixed tool batch stops after wait:true without later side effects or a duplicate send", async () => {
   state(); const r = await runtime(true); const sideEffect = join(r.session.sessionManager.getCwd(), "unwanted-write");
   try {

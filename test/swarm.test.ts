@@ -156,6 +156,20 @@ test("canonical Git roots separate nested repositories, worktrees, submodules an
   assert.equal(roots.size, 1); assert.ok(roots.has(sub));
 });
 
+test("pane targets support unnamed agents and preserve self/session guards", async () => {
+  reset({ agents: [
+    { name: "spawner", pane_id: "w1:p1", agent: "pi" },
+    { pane_id: "w1:pDE", agent: "claude" },
+    { name: "peer", pane_id: "w1:p2", agent: "pi", agent_session: { kind: "path", value: "/other.jsonl" } },
+  ] });
+  const sent = await deliver({ from: "spawner", to: "w1:pDE", message: "hello" });
+  assert.equal(sent.deliveries[0].status, "submitted");
+  assert.equal(calls().filter(c => c[1] === "prompt").at(-1)![2], "w1:pDE");
+  assert.equal((await deliver({ from: "spawner", to: "w1:p1", message: "self" })).deliveries[0].code, "self");
+  assert.equal((await deliver({ from: "spawner", to: "w1:p2", message: "wrong session", sessions: new Map([["peer", "/expected.jsonl"]]) })).deliveries[0].code, "session_mismatch");
+  assert.equal(calls().filter(c => c[1] === "prompt").length, 1);
+});
+
 test("wildcards and malformed recipient arrays fail before any delivery", async () => {
   reset();
   for (const to of ["*", "*news*", "news?", "[news]*", "news.*", [], ["peer", "*"], ["peer", null], ["peer", 2], "peer\n", null]) {
