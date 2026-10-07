@@ -97,7 +97,7 @@ try {
   assert.equal(self.details.deliveries[0].code, "self");
   console.log(`PASS: self-send blocked; experimental host stayed unnamed for all tools (${server})`);
 
-  // Separate production check: no source rewriting, actual pane→name wait alias.
+  // Separate production host: no source rewriting, exercises pane→name reply alias.
   hostPane = (await cli(["tab", "create", "--workspace", workspace!, "--no-focus", "--cwd", base])).root_pane.pane_id;
   hostFile = join(base, "production-host.jsonl");
   await cli(["agent", "start", "production-host", "--kind", "pi", "--pane", hostPane, "--", "--session", hostFile, "-e", resolve("src/index.ts"), "--model", "swarm-e2e/scripted", "--thinking", "off"], 70_000);
@@ -115,6 +115,8 @@ try {
   writeFileSync(join(base, "production-release"), "released");
   await wait(() => received(run.session, "PRODUCTION_PANE_MESSAGE"), "production pane delivery");
   await wait(() => received(hostFile, "PRODUCTION_ALIAS_REPLY"), "production named reply");
+  const childSend = await wait(() => readSession(run.session).getBranch().find(e => e.type === "message" && e.message.role === "toolResult" && e.message.toolName === "swarm_send"), "child send to named host");
+  assert.equal((childSend as any).message.details.deliveries[0].status, "submitted");
   await wait(() => waitingForReply(readSession(hostFile)).length === 0, "production named reply releases pane wait");
   console.log("PASS: shipped extension sends by pane ID with wait:true; named peer reply releases wait");
 } catch (error) {

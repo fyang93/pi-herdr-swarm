@@ -179,7 +179,6 @@ export async function deliver(input: { from: string; to: string | string[]; mess
         if (sessionPath(owner.agent_session!.value) !== sessionPath(session)) return { to, status: "rejected", code: "session_mismatch", error: `Name ${to} is occupied by another session (名字已被其他会话占用); expected ${session}.` };
       }
       await prompt(to, messageText(from, to, message, input.wait));
-      // ponytail: alias snapshot; include stable sender pane IDs if rename-safe waits become necessary.
       return { to, ...(input.wait && targetOwner?.name ? { replyFrom: targetOwner.name } : {}), ...deliveryOutcome() };
     } catch (error) { return { to, ...deliveryOutcome(error) }; }
   }));
